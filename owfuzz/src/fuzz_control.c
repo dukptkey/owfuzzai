@@ -3136,7 +3136,7 @@ int fuzzing(int argc, char *argv[])
 	{
 		fuzzing_opt.enable_check_alive = 1;
 		// fuzz_logger_log(FUZZ_LOG_INFO, "IP Address has been provided: '%s', init_ping_sock called", fuzzing_opt.target_ip);
-		init_ping_sock(&fuzzing_opt);
+		init_ping_sock();
 	}
 
 	if (TEST_INTERACTIVE == fuzzing_opt.test_type)

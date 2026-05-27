@@ -70,8 +70,8 @@ struct ieee8021x_auth
   uint64_t replay_counter;
   uint8_t nonce[32];
   uint8_t key_iv[16];
-  uint64_t key_rsc;
-  uint64_t key_id;
+  uint8_t key_rsc[8];
+  uint8_t key_id[8];
   uint8_t key_mic[16];
   uint16_t wpa_length;
 } __attribute__((packed));
