@@ -174,6 +174,10 @@ void usage_help(char *name)
 		   "\t   Log file path\n"
 		   "\t-r [seed value]\n"
 		   "\t   Set the seed value for srandom, if not provided, srandom(time(NULL)..) will be used\n"
+		   "\t-p [corpus file]\n"
+		   "\t   Path to an external frame corpus to replay for the PoC test (-T 0). Overrides the default 'poc.txt'.\n"
+		   "\t-o [results file]\n"
+		   "\t   Write a per-frame results log (TSV) for the PoC test (-T 0). 'alive'=0 marks the target going silent (OTA beacon liveness, or ping if -I is set).\n"
 		   "\t-h Help.\n",
 		   TEST_FRAME, TEST_INTERACTIVE, TEST_POC, TEST_INTERACTIVE, TEST_FRAME, TEST_INTERACTIVE_FRAME);
 }
@@ -191,6 +195,7 @@ void *test_bad_frame(void *param)
 	struct beacon_fixed *bf;
 	static uint64_t internal_timestamp = 0;
 	int bad_frame_packets = 0;
+	FILE *results_fp = NULL;
 
 	bad_frame = (struct packet *)malloc(sizeof(struct packet) * MAX_BAD_FRAME_COUNT);
 	memset(bad_frame, 0, sizeof(struct packet) * MAX_BAD_FRAME_COUNT);
@@ -206,6 +211,15 @@ void *test_bad_frame(void *param)
 	if (0 == bad_frame_packets) {
 		fuzz_logger_log(FUZZ_LOG_ERR, "No bad frame packets defined, exiting");
 		exit(-1);
+	}
+
+	if (fuzzing_opt->results_file[0] != '\0')
+	{
+		results_fp = fopen(fuzzing_opt->results_file, "w");
+		if (!results_fp)
+			fuzz_logger_log(FUZZ_LOG_ERR, "fopen results '%s' failed.", fuzzing_opt->results_file);
+		else
+			fprintf(results_fp, "# ts_ms\tidx\tfc_type\tfc_subtype\tlen\talive\tpoc\n");
 	}
 
 	sleep(2);
@@ -379,9 +393,31 @@ void *test_bad_frame(void *param)
 
 				log_pkt(FUZZ_LOG_INFO, &bad_frame[i]);
 
+				int alive = 1;
 				if (fuzzing_opt->enable_check_alive)
-					if (!check_alive_by_ping())
-						exit(-1);
+					alive = check_alive_by_ping();
+
+				// OTA liveness (no target IP needed): an alive AP keeps emitting frames
+				// (e.g. beacons), refreshing last_recv_pkt_time in start_fuzzing; silence
+				// beyond CHECK_ALIVE_TIME means the target likely crashed.
+				if (alive && fuzzing_opt->last_recv_pkt_time != 0 &&
+					(time(NULL) - fuzzing_opt->last_recv_pkt_time) > CHECK_ALIVE_TIME)
+					alive = 0;
+
+				if (results_fp)
+				{
+					struct timeval tv;
+					uint8_t fc = bad_frame[i].data[0];
+					gettimeofday(&tv, NULL);
+					fprintf(results_fp, "%llu\t%d\t%d\t0x%02x\t%u\t%d\t%s\n",
+							(unsigned long long)((uint64_t)tv.tv_sec * 1000 + tv.tv_usec / 1000),
+							i, (fc >> 2) & 0x03, (fc >> 4) & 0x0f,
+							bad_frame[i].len, alive, alive ? "-" : "poc.pcap");
+					fflush(results_fp);
+				}
+
+				if (fuzzing_opt->enable_check_alive && !alive)
+					exit(-1);
 			}
 		}
 
@@ -2649,24 +2685,31 @@ int load_payloads()
 	char owfuzz_path[256] = {0};
 	char *ptr;
 
-	if (readlink("/proc/self/exe", owfuzz_path, sizeof(owfuzz_path)) <= 0)
+	if (fuzzing_opt.payload_file[0] != '\0')
 	{
-		return 0;
+		strncpy(owfuzz_path, fuzzing_opt.payload_file, sizeof(owfuzz_path) - 1);
 	}
-
-	ptr = strrchr(owfuzz_path, '/');
-	if (!ptr)
+	else
 	{
-		return 0;
-	}
+		if (readlink("/proc/self/exe", owfuzz_path, sizeof(owfuzz_path)) <= 0)
+		{
+			return 0;
+		}
 
-	ptr[1] = '\0';
-	strcat(owfuzz_path, "poc.txt");
+		ptr = strrchr(owfuzz_path, '/');
+		if (!ptr)
+		{
+			return 0;
+		}
+
+		ptr[1] = '\0';
+		strcat(owfuzz_path, "poc.txt");
+	}
 
 	fp = fopen(owfuzz_path, "r");
 	if (!fp)
 	{
-		fuzz_logger_log(FUZZ_LOG_ERR, "fopen 'poc.txt' failed.");
+		fuzz_logger_log(FUZZ_LOG_ERR, "fopen '%s' failed.", owfuzz_path);
 		return 0;
 	}
 
@@ -2795,7 +2838,7 @@ int fuzzing(int argc, char *argv[])
 
 	if (argc > 1)
 	{
-		while ((c = getopt(argc, argv, "m:i:t:s:b:I:c:hS:A:T:l:f")) < 255)
+		while ((c = getopt(argc, argv, "m:i:t:s:b:I:c:hS:A:T:l:f:r:p:o:")) < 255)
 		{
 			switch (c)
 			{
@@ -2914,9 +2957,16 @@ int fuzzing(int argc, char *argv[])
 			case 'f':
 				file_log_path = strdup(optarg);
 				strncpy(fuzzing_opt.log_file, file_log_path, sizeof(fuzzing_opt.log_file) - 1);
+				break;
 			case 'r':
 				seed_str = strdup(optarg);
 				sscanf(seed_str, "%lu", &seed);
+				break;
+			case 'p':
+				strncpy(fuzzing_opt.payload_file, optarg, sizeof(fuzzing_opt.payload_file) - 1);
+				break;
+			case 'o':
+				strncpy(fuzzing_opt.results_file, optarg, sizeof(fuzzing_opt.results_file) - 1);
 				break;
 			default:
 				fuzz_logger_log(FUZZ_LOG_ERR, "Unknow option %c!", c);

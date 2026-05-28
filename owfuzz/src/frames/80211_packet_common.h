@@ -220,6 +220,8 @@ typedef struct _fuzzing_option
 
   int log_level;
   char log_file[256];
+  char payload_file[256];
+  char results_file[256];
 
   struct sniffed_frame sfs[MAX_SFS_COUNT];
   volatile int cur_sfs_cnt;

@@ -1,0 +1,34 @@
+IEEE 802.11 Management Frames — structural summary (paraphrased, for tooling smoke tests)
+
+General. Management frames use the MAC header (Frame Control, Duration, Address 1 =
+DA, Address 2 = SA, Address 3 = BSSID, Sequence Control). The Frame Control Type
+subfield = 0 (management). The Subtype subfield selects the management frame.
+The frame body consists of zero or more fixed fields followed by zero or more
+information elements (IEs). Each IE is encoded as Element ID (1 octet), Length
+(1 octet), and a variable-length value of "Length" octets.
+
+Beacon (subtype 8). Fixed fields, in order: Timestamp (8 octets), Beacon Interval
+(2 octets, in TUs), Capability Information (2 octets). Information elements: SSID
+(Element ID 0; 0-32 octets), Supported Rates (ID 1; 1-8 octets), DS Parameter Set
+(ID 3; 1 octet = current channel), TIM (ID 5), Country (ID 7), RSN (ID 48),
+Extended Supported Rates (ID 50). SSID and Supported Rates are mandatory.
+
+Probe Request (subtype 4). No fixed fields. Information elements: SSID (ID 0;
+mandatory), Supported Rates (ID 1; mandatory), Extended Supported Rates (ID 50;
+optional). Used by stations to actively scan for BSSs.
+
+Authentication (subtype 11). Fixed fields, in order: Authentication Algorithm
+Number (2 octets; 0 = Open System, 1 = Shared Key, 3 = SAE), Authentication
+Transaction Sequence Number (2 octets), Status Code (2 octets). Information
+elements: Challenge Text (ID 16) is present only in Shared Key authentication
+frames 2 and 3.
+
+Association Request (subtype 0). Fixed fields, in order: Capability Information
+(2 octets), Listen Interval (2 octets). Information elements: SSID (ID 0;
+mandatory), Supported Rates (ID 1; mandatory), RSN (ID 48; present for RSNA),
+Extended Capabilities (ID 127; optional). Sent by a station to join a BSS after
+successful authentication.
+
+Deauthentication (subtype 12). Fixed field: Reason Code (2 octets). May carry a
+Vendor Specific element (ID 221). Notifies that an existing authentication is
+terminated.
