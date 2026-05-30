@@ -1,0 +1,30 @@
+## beacon (subtype 8)
+Beacon frame (management subtype 8). Periodically transmitted by an AP (or IBSS station) to advertise BSS presence, timing (Timestamp), Beacon Interval in TUs, and Capability Information, followed by IEs describing the BSS.
+
+- IE 0 SSID [mandatory]: 0-32 octets; Element ID 0
+- IE 1 Supported Rates [mandatory]: 1-8 octets; Element ID 1
+- IE 3 DS Parameter Set [optional]: 1 octet current channel; Element ID 3
+- IE 5 TIM [optional]: Element ID 5
+- IE 7 Country [optional]: Element ID 7
+- IE 48 RSN [optional]: Element ID 48; present for RSNA
+- IE 50 Extended Supported Rates [optional]: Element ID 50
+
+## probe_request (subtype 4)
+Probe Request (subtype 4) has no fixed fields; sent by stations during active scanning to discover BSSs.
+
+- IE 0 SSID [mandatory]: 0-32 octets; wildcard SSID is zero-length
+- IE 1 Supported Rates [mandatory]: 1-8 octets
+- IE 50 Extended Supported Rates [optional]: Present when more than 8 rates are supported
+
+## authentication (subtype 11)
+Authentication management frame (subtype 11). Fixed fields in order: Authentication Algorithm Number (2 octets; 0=Open System, 1=Shared Key, 3=SAE), Authentication Transaction Sequence Number (2 octets), Status Code (2 octets). Baseline shows Open System (0x0000), seq 1 (0x0100 little-endian), status 0 (0x0000). Challenge Text IE only appears in Shared Key auth frames 2 and 3.
+
+- IE 16 Challenge Text [conditional]: Present only in Shared Key authentication frames 2 and 3; value is the challenge text octets.
+
+## assoc_request (subtype 0)
+Association Request (subtype 0). Sent by a station to join a BSS after successful authentication. Fixed fields: Capability Information (2 octets) and Listen Interval (2 octets).
+
+- IE 0 SSID [mandatory]: 0-32 octets; SSID of the target BSS
+- IE 1 Supported Rates [mandatory]: 1-8 octets; supported data rates
+- IE 48 RSN [conditional]: Present for RSNA
+- IE 127 Extended Capabilities [optional]: Optional extended capabilities
