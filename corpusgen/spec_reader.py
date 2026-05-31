@@ -91,8 +91,8 @@ def clean_hex(value):
     return s
 
 
-def extract_frame(client, model, system_blocks, frame_name):
-    user = (
+def frame_user_prompt(frame_name):
+    return (
         f"Extract the schema for the 802.11 management frame: '{frame_name}'.\n"
         "Provide: the frame-control subtype (integer 0-15); the fixed-field portion as "
         "baseline hex ('fixed', '' if the frame has none); and the ordered list of IEs "
@@ -103,6 +103,10 @@ def extract_frame(client, model, system_blocks, frame_name):
         "ranges, constraints, and the spec clause). "
         "Summarize the frame and its state/usage in the top-level 'notes'."
     )
+
+
+def extract_frame(client, model, system_blocks, frame_name):
+    user = frame_user_prompt(frame_name)
     resp = client.messages.create(
         model=model,
         max_tokens=16000,
@@ -157,27 +161,31 @@ def render_notes(frame_key, extracted):
 
 
 def run(args):
-    import anthropic  # imported here so --self-test works without the package installed
-
     with open(args.spec) as f:
         spec_text = f.read()
 
-    client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
-    system_blocks = build_system(spec_text)
+    if args.backend == "api":
+        import anthropic  # imported here so --self-test works without the package installed
+        client = anthropic.Anthropic()  # reads ANTHROPIC_API_KEY
+        system_blocks = build_system(spec_text)
+    else:
+        import llm_cli  # subscription-backed claude CLI dispatch
+        system_text = SYSTEM_INSTRUCTIONS + "\n\n=== IEEE 802.11 SPECIFICATION EXCERPT ===\n" + spec_text
 
     schema, notes_parts, warnings = {}, [], []
     for frame in [s.strip() for s in args.frames.split(",") if s.strip()]:
-        extracted, usage = extract_frame(client, args.model, system_blocks, frame)
+        if args.backend == "api":
+            extracted, usage = extract_frame(client, args.model, system_blocks, frame)
+            meta = "cache_read=%s cache_write=%s input=%s" % (
+                usage.cache_read_input_tokens, usage.cache_creation_input_tokens, usage.input_tokens)
+        else:
+            extracted = llm_cli.complete_json(system_text, frame_user_prompt(frame), FRAME_SCHEMA)
+            meta = "via claude CLI"
         entry, warns = normalize(frame, extracted)
         schema[frame] = entry
         warnings += warns
         notes_parts.append(render_notes(frame, extracted))
-        print(
-            "extracted %-16s ies=%d  (cache_read=%s cache_write=%s input=%s)"
-            % (frame, len(entry["ies"]), usage.cache_read_input_tokens,
-               usage.cache_creation_input_tokens, usage.input_tokens),
-            file=sys.stderr,
-        )
+        print("extracted %-16s ies=%d  (%s)" % (frame, len(entry["ies"]), meta), file=sys.stderr)
 
     write_outputs(schema, "\n".join(notes_parts), args.out, args.notes)
     for w in warnings:
@@ -231,7 +239,9 @@ def main():
     ap.add_argument("--frames", default=DEFAULT_FRAMES, help="comma-separated frame families")
     ap.add_argument("--out", default="schema.spec", help="schema output (JSON content)")
     ap.add_argument("--notes", default="spec_notes.txt", help="natural-language notes output")
-    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--model", default=DEFAULT_MODEL, help="API backend model (ignored by --backend cli)")
+    ap.add_argument("--backend", choices=["api", "cli"], default="api",
+                    help="api = Anthropic SDK (ANTHROPIC_API_KEY); cli = `claude -p` (Max subscription)")
     ap.add_argument("--self-test", action="store_true", help="run offline plumbing test (no API)")
     args = ap.parse_args()
 

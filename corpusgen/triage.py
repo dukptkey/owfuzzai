@@ -132,8 +132,8 @@ def build_system(spec_notes):
     return blocks
 
 
-def triage_llm(client, model, system_blocks, summary_text):
-    user = (
+def triage_user_prompt(summary_text):
+    return (
         "Here is the campaign summary:\n\n" + summary_text + "\n\n"
         "Produce: (1) findings (one per notable frame, severity crash|anomaly|info); "
         "(2) crash_analysis (root-cause hypothesis grounded in the frame/mutation that "
@@ -141,6 +141,10 @@ def triage_llm(client, model, system_blocks, summary_text):
         "focus_mutations to emphasize next, drop_frames to stop wasting budget on, and a "
         "rationale. Use the exact frame-family and mutation names seen in the summary."
     )
+
+
+def triage_llm(client, model, system_blocks, summary_text):
+    user = triage_user_prompt(summary_text)
     resp = client.messages.create(
         model=model,
         max_tokens=16000,
@@ -167,8 +171,6 @@ def write_outputs(triage, summary_text, plan_path, report_path):
 
 
 def run(args):
-    import anthropic  # lazy so --self-test needs no package/key
-
     records = parse_results(args.results, args.labels)
     if not records:
         print("no records parsed from %s" % args.results, file=sys.stderr)
@@ -176,8 +178,14 @@ def run(args):
     summary, summary_text = summarize(records)
     spec_notes = open(args.notes).read() if args.notes else ""
 
-    client = anthropic.Anthropic()
-    triage = triage_llm(client, args.model, build_system(spec_notes), summary_text)
+    if args.backend == "api":
+        import anthropic  # lazy so --self-test needs no package/key
+        client = anthropic.Anthropic()
+        triage = triage_llm(client, args.model, build_system(spec_notes), summary_text)
+    else:
+        import llm_cli  # subscription-backed claude CLI dispatch
+        system_text = SYSTEM_INSTRUCTIONS + (("\n\n=== SPEC NOTES (context) ===\n" + spec_notes) if spec_notes else "")
+        triage = llm_cli.complete_json(system_text, triage_user_prompt(summary_text), PLAN_SCHEMA)
 
     write_outputs(triage, summary_text, args.plan_out, args.report_out)
     crash = summary["crash"]
@@ -229,7 +237,9 @@ def main():
     ap.add_argument("--notes", help="spec_notes.txt for context (optional, cached)")
     ap.add_argument("--plan-out", default="fuzz_plan.spec", dest="plan_out")
     ap.add_argument("--report-out", default="triage.txt", dest="report_out")
-    ap.add_argument("--model", default=DEFAULT_MODEL)
+    ap.add_argument("--model", default=DEFAULT_MODEL, help="API backend model (ignored by --backend cli)")
+    ap.add_argument("--backend", choices=["api", "cli"], default="api",
+                    help="api = Anthropic SDK (ANTHROPIC_API_KEY); cli = `claude -p` (Max subscription)")
     ap.add_argument("--self-test", action="store_true", help="run offline plumbing test (no API)")
     args = ap.parse_args()
 
