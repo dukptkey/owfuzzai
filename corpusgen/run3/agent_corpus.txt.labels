@@ -1,0 +1,19 @@
+# idx	label	len
+0	beacon/baseline	101
+1	beacon/len_overflow	101
+2	beacon/oversized_value	348
+3	beacon/dup_ie	111
+4	beacon/missing_mandatory	91
+5	beacon/reserved_ie	111
+6	authentication/baseline	48
+7	authentication/len_overflow	48
+8	authentication/oversized_value	287
+9	authentication/dup_ie	66
+10	authentication/missing_mandatory	30
+11	authentication/reserved_ie	58
+12	assoc_request/baseline	80
+13	assoc_request/len_overflow	80
+14	assoc_request/oversized_value	327
+15	assoc_request/dup_ie	90
+16	assoc_request/missing_mandatory	70
+17	assoc_request/reserved_ie	90
