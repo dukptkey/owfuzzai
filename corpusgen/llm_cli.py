@@ -31,7 +31,7 @@ def _strip_fences(text):
     return t.strip()
 
 
-def complete_json(system_text, user_text, schema, model=None, timeout=600):
+def complete_json(system_text, user_text, schema, model=None, timeout=600, retries=2):
     """Run one prompt through the claude CLI and return the parsed JSON object."""
     prompt = (
         system_text + "\n\n" + user_text + "\n\n"
@@ -42,7 +42,13 @@ def complete_json(system_text, user_text, schema, model=None, timeout=600):
     cmd = ["claude", "-p", "--output-format", "json"]
     if model:
         cmd += ["--model", model]
-    proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError("claude CLI failed (%d): %s" % (proc.returncode, proc.stderr[:500]))
-    return json.loads(_strip_fences(_extract_result(proc.stdout)))
+    last_err = None
+    for attempt in range(retries):
+        proc = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout)
+        if proc.returncode != 0:
+            raise RuntimeError("claude CLI failed (%d): %s" % (proc.returncode, proc.stderr[:500]))
+        try:
+            return json.loads(_strip_fences(_extract_result(proc.stdout)))
+        except (json.JSONDecodeError, StopIteration, KeyError) as e:
+            last_err = e
+    raise RuntimeError("claude CLI returned unparseable JSON after %d attempts: %s" % (retries, last_err))

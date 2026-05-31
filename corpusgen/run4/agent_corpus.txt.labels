@@ -1,0 +1,21 @@
+# idx	label	len
+0	probe_request/baseline	50
+1	probe_request/oversized_value	297
+2	probe_request/dup_ie	60
+3	probe_request/missing_mandatory	40
+4	authentication/baseline	48
+5	authentication/oversized_value	287
+6	authentication/dup_ie	66
+7	authentication/missing_mandatory	30
+8	authentication/auth_algo_unknown	48
+9	authentication/auth_algo_sharedkey	48
+10	authentication/auth_algo_sae	48
+11	authentication/auth_seq_oor	48
+12	authentication/auth_status_nonzero	48
+13	assoc_request/baseline	80
+14	assoc_request/oversized_value	327
+15	assoc_request/dup_ie	90
+16	assoc_request/missing_mandatory	70
+17	assoc_request/assoc_cap_reserved	80
+18	assoc_request/assoc_listen_zero	80
+19	assoc_request/assoc_listen_max	80
