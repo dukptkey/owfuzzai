@@ -226,7 +226,9 @@ def self_test():
     fams = {f.split("/", 1)[0] for f, _ in frames}
     assert fams == {"authentication"}, fams  # focus_frames honored, beacon dropped
     muts = {f.split("/", 1)[1] for f, _ in frames}
-    assert muts <= {"baseline", "len_overflow", "oversized_value"}, muts  # focus_mutations honored
+    # focus_mutations filters IE mutations; fixed-field mutations always pass through.
+    ie_muts = {m for m in muts if not m.startswith("auth_")}
+    assert ie_muts <= {"baseline", "len_overflow", "oversized_value"}, ie_muts
     print("self-test OK: plan parsed, synthesizer focused to %s (%d frames)" % (fams, len(frames)), file=sys.stderr)
 
 

@@ -37,8 +37,10 @@ def ie(eid, value, length=None):
     return bytes([eid & 0xFF, length & 0xFF]) + value
 
 
-def build(frame, ies):
-    return mac_header(frame["subtype"]) + frame.get("fixed", b"") + b"".join(ies)
+def build(frame, ies, fixed=None):
+    if fixed is None:
+        fixed = frame.get("fixed", b"")
+    return mac_header(frame["subtype"]) + fixed + b"".join(ies)
 
 
 def to_owfuzz_hex(raw):
@@ -113,6 +115,55 @@ def mutations(frame):
     return out
 
 
+# Fixed-field mutation table keyed by 802.11 management subtype.
+# Each entry is a list of (label, transform) where transform(fixed_bytes) -> mutated_bytes.
+# Fields are little-endian as on the wire.
+_u16le = lambda v: v.to_bytes(2, "little")
+FIXED_FIELD_MUTATIONS = {
+    # Authentication: Algorithm(2) + TransactionSeq(2) + StatusCode(2)
+    0x0B: [
+        # Unknown algorithm -> driver hits unhandled branch
+        ("auth_algo_unknown",    lambda f: _u16le(0xFFFF) + f[2:6]),
+        # Shared Key auth -> triggers challenge-text state machine
+        ("auth_algo_sharedkey",  lambda f: _u16le(0x0001) + f[2:6]),
+        # SAE/WPA3 -> triggers SAE state machine on WPA2-only drivers
+        ("auth_algo_sae",        lambda f: _u16le(0x0003) + f[2:6]),
+        # Out-of-order sequence (seq=3 before seq=1) -> state machine confusion
+        ("auth_seq_oor",         lambda f: f[0:2] + _u16le(0x0003) + f[4:6]),
+        # Non-zero status in a request frame -> illegal per spec
+        ("auth_status_nonzero",  lambda f: f[0:4] + _u16le(0x0001)),
+    ],
+    # Beacon: Timestamp(8) + BeaconInterval(2) + CapabilityInfo(2)
+    0x08: [
+        # Zero beacon interval -> divide-by-zero in drivers that compute TU timing
+        ("beacon_interval_zero", lambda f: f[0:8] + _u16le(0x0000) + f[10:12]),
+        # Max beacon interval (~65 s) -> STA retransmit/timeout edge case
+        ("beacon_interval_max",  lambda f: f[0:8] + _u16le(0xFFFF) + f[10:12]),
+        # All capability bits set including reserved -> mode-switching edge case
+        ("beacon_cap_reserved",  lambda f: f[0:10] + _u16le(0xFFFF)),
+    ],
+    # Association Request: CapabilityInfo(2) + ListenInterval(2)
+    0x00: [
+        # All capability bits set including reserved
+        ("assoc_cap_reserved",   lambda f: _u16le(0xFFFF) + f[2:4]),
+        # Zero listen interval -> driver divides or compares against 0
+        ("assoc_listen_zero",    lambda f: f[0:2] + _u16le(0x0000)),
+        # Max listen interval -> extreme sleep-mode buffer sizing
+        ("assoc_listen_max",     lambda f: f[0:2] + _u16le(0xFFFF)),
+    ],
+}
+
+
+def fixed_mutations(frame):
+    """Fixed-field variants: (label, mutated_fixed_bytes).
+    Returns [] for frames with no fixed fields or no registered mutations."""
+    f = frame.get("fixed", b"")
+    variants = FIXED_FIELD_MUTATIONS.get(frame["subtype"], [])
+    if not f or not variants:
+        return []
+    return [(label, xform(f)) for label, xform in variants]
+
+
 def generate(schema, plan=None):
     plan = plan or {}
     focus_frames = set(plan.get("focus_frames") or [])
@@ -129,6 +180,9 @@ def generate(schema, plan=None):
             if focus_muts and label not in focus_muts:
                 continue
             frames.append(("%s/%s" % (name, label), build(fr, ies)))
+        # Fixed-field mutations use baseline IEs; always included for in-scope frames.
+        for label, fixed in fixed_mutations(fr):
+            frames.append(("%s/%s" % (name, label), build(fr, baseline_ies(fr), fixed=fixed)))
     return frames
 
 
