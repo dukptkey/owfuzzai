@@ -26,8 +26,13 @@ SYSTEM_INSTRUCTIONS = (
     "do NOT include the 1-octet Element ID or the 1-octet Length; the downstream tool "
     "prepends those itself. Example: an SSID element for 'Home' has value '486f6d65' (the "
     "4 ASCII bytes), NOT '0004486f6d65'; a DS Parameter Set on channel 6 has value '06', "
-    "NOT '030106'. Ground every field in the provided spec text; do NOT invent IEs the "
-    "spec does not define for this frame."
+    "NOT '030106'. Ground the frame STRUCTURE — which IEs exist, their order, the fixed "
+    "fields — strictly in the provided spec text; do NOT invent IEs the spec does not "
+    "define for this frame. But for each IE that IS present, ALWAYS supply a "
+    "representative, spec-valid baseline 'value' (e.g. a plausible SSID '6f7766757a7a6169', "
+    "a full Supported Rates set, the DS channel byte) even when the spec describes the "
+    "field abstractly instead of giving literal bytes; emit '' ONLY when the element "
+    "genuinely carries no payload (a flag/marker-only element)."
 )
 
 # Structured-output schema for ONE frame family. The consumer (synthesizer.py) reads
@@ -47,7 +52,7 @@ FRAME_SCHEMA = {
                     "id": {"type": "integer"},
                     "name": {"type": "string"},
                     "presence": {"type": "string", "description": "mandatory | optional | conditional"},
-                    "value": {"type": "string", "description": "baseline hex of ONLY the IE value/payload — exclude the Element ID and Length octets ('' if the element value is empty)"},
+                    "value": {"type": "string", "description": "representative baseline hex of ONLY the IE value/payload — exclude the Element ID and Length octets; supply a plausible spec-valid example even if the spec is abstract, '' only for genuinely payload-less elements"},
                     "notes": {"type": "string"},
                 },
                 "required": ["id", "name", "presence", "value", "notes"],
@@ -91,9 +96,11 @@ def extract_frame(client, model, system_blocks, frame_name):
         f"Extract the schema for the 802.11 management frame: '{frame_name}'.\n"
         "Provide: the frame-control subtype (integer 0-15); the fixed-field portion as "
         "baseline hex ('fixed', '' if the frame has none); and the ordered list of IEs "
-        "with id, name, presence (mandatory/optional/conditional), a baseline hex 'value' "
-        "(PAYLOAD ONLY — no Element ID or Length octets, e.g. DS Parameter Set channel 6 is "
-        "'06' not '030106'), and 'notes' (value ranges, constraints, and the spec clause). "
+        "with id, name, presence (mandatory/optional/conditional), a representative baseline "
+        "hex 'value' (PAYLOAD ONLY — no Element ID or Length octets, e.g. DS Parameter Set "
+        "channel 6 is '06' not '030106'; supply a plausible spec-valid example even when the "
+        "spec is abstract, '' only for genuinely payload-less elements), and 'notes' (value "
+        "ranges, constraints, and the spec clause). "
         "Summarize the frame and its state/usage in the top-level 'notes'."
     )
     resp = client.messages.create(

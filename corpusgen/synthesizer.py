@@ -93,10 +93,15 @@ def mutations(frame):
     if base:
         first = base[0]
         rest = [ie(x["id"], x["value"]) for x in base[1:]]
-        # IE length field larger than the value present -> parser over-read.
-        out.append(("len_overflow", [ie(first["id"], first["value"], len(first["value"]) + 32)] + rest))
-        # Oversized value (e.g. SSID well beyond 32 bytes).
-        out.append(("oversized_value", [ie(first["id"], first["value"] * 40)] + rest))
+        # Non-empty seed so the length/size operators below never collapse to a no-op
+        # when the baseline value is empty (e.g. a network-specific SSID the spec leaves blank).
+        seed = first["value"] or b"\x41"
+        # IE length field larger than the bytes actually present -> parser over-read.
+        out.append(("len_overflow", [ie(first["id"], seed, len(seed) + 32)] + rest))
+        # Oversized value: absolute over-long payload (255B, past the 32-byte SSID cap),
+        # independent of the baseline length so it grows even from an empty/short value.
+        big = (seed * (255 // len(seed) + 1))[:255]
+        out.append(("oversized_value", [ie(first["id"], big)] + rest))
         # Duplicate first IE.
         out.append(("dup_ie", [ie(first["id"], first["value"]), ie(first["id"], first["value"])] + rest))
         # Drop the (mandatory) first IE.
