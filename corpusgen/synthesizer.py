@@ -6,6 +6,14 @@ owfuzz's replay format (one frame per line, each byte as \\xHH) so they can be
 fed via `owfuzz -T 0 -p <file>`. owfuzz rewrites addr1/2/3 at send time, so the
 placeholder addresses here are fine.
 
+Each frame is preceded by a directive comment that tags the protocol state and
+frame type it belongs to, e.g. `# @state=AUTHENTICATING @type=AUTH`. The PoC
+test (-T 0) ignores these comments and replays statelessly; the interactive
+test (-T 1) parses them (see owfuzz/src/frames/corpus.h) and injects each frame
+into the handshake at the matching point. The tags are plain comments, so the
+file stays backward-compatible and the .labels/results idx mapping is unaffected
+(owfuzz counts frames, not lines).
+
 The schema is the contract the (future) Spec-Reader agent will emit. A built-in
 sample is used unless --schema FILE is given (JSON content; bytes encoded as hex
 strings).
@@ -15,6 +23,29 @@ import json
 import sys
 
 TYPE_MGMT = 0
+
+# Map each schema frame family to the (wpa_state, frame_type) tag owfuzz's
+# interactive corpus parser understands (state names from enum wpa_states,
+# type names from corpus.c:type_from_name). The state is where owfuzz sends the
+# frame during the STA-mode handshake; corpus_lookup treats it as a refinement,
+# so the type tag is what guarantees the frame is used. Families absent here are
+# emitted untagged (owfuzz then derives the type from the frame's FC octet).
+STATE_TYPE_MAP = {
+    "beacon":         ("SCANNING",       "BEACON"),
+    "probe_request":  ("SCANNING",       "PROBEREQ"),
+    "authentication": ("AUTHENTICATING", "AUTH"),
+    "assoc_request":  ("ASSOCIATING",    "ASSOCREQ"),
+    "sae_commit":     ("AUTHENTICATING", "AUTH"),
+    "sae_confirm":    ("AUTHENTICATING", "AUTH"),
+}
+
+# Map a schema frame family to the flow-engine @send id used by a flow file
+# (owfuzz/src/frames/flow.h). The generic engine sends frames by these ids, so a
+# flow rule's `send` column references them. Used for Option B (stateful flows).
+SEND_ID_MAP = {
+    "sae_commit":  "sae_commit",
+    "sae_confirm": "sae_confirm",
+}
 
 
 def fc_byte0(subtype, ftype=TYPE_MGMT):
@@ -121,17 +152,20 @@ def mutations(frame):
 _u16le = lambda v: v.to_bytes(2, "little")
 FIXED_FIELD_MUTATIONS = {
     # Authentication: Algorithm(2) + TransactionSeq(2) + StatusCode(2)
+    # Slices keep the tail (f[2:], f[4:], f[6:]) so these also work on longer
+    # auth bodies (e.g. SAE commit/confirm) without truncating them; for a plain
+    # 6-byte auth header the tail is empty, so behavior is unchanged.
     0x0B: [
         # Unknown algorithm -> driver hits unhandled branch
-        ("auth_algo_unknown",    lambda f: _u16le(0xFFFF) + f[2:6]),
+        ("auth_algo_unknown",    lambda f: _u16le(0xFFFF) + f[2:]),
         # Shared Key auth -> triggers challenge-text state machine
-        ("auth_algo_sharedkey",  lambda f: _u16le(0x0001) + f[2:6]),
+        ("auth_algo_sharedkey",  lambda f: _u16le(0x0001) + f[2:]),
         # SAE/WPA3 -> triggers SAE state machine on WPA2-only drivers
-        ("auth_algo_sae",        lambda f: _u16le(0x0003) + f[2:6]),
+        ("auth_algo_sae",        lambda f: _u16le(0x0003) + f[2:]),
         # Out-of-order sequence (seq=3 before seq=1) -> state machine confusion
-        ("auth_seq_oor",         lambda f: f[0:2] + _u16le(0x0003) + f[4:6]),
+        ("auth_seq_oor",         lambda f: f[0:2] + _u16le(0x0003) + f[4:]),
         # Non-zero status in a request frame -> illegal per spec
-        ("auth_status_nonzero",  lambda f: f[0:4] + _u16le(0x0001)),
+        ("auth_status_nonzero",  lambda f: f[0:4] + _u16le(0x0001) + f[6:]),
     ],
     # Beacon: Timestamp(8) + BeaconInterval(2) + CapabilityInfo(2)
     0x08: [
@@ -193,7 +227,17 @@ def load_plan(path):
 
 def write_corpus(frames, output, write_labels=False):
     with open(output, "w") as f:
-        for _, raw in frames:
+        for label, raw in frames:
+            family = label.split("/", 1)[0]
+            toks = []
+            st = STATE_TYPE_MAP.get(family)
+            if st:
+                toks.append("@state=%s @type=%s" % st)
+            sid = SEND_ID_MAP.get(family)
+            if sid:
+                toks.append("@send=%s" % sid)
+            if toks:
+                f.write("# " + " ".join(toks) + "\n")
             f.write(to_owfuzz_hex(raw) + "\n")
     if write_labels:
         with open(output + ".labels", "w") as f:

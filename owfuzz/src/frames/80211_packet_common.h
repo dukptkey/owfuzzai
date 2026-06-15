@@ -206,6 +206,7 @@ typedef struct _fuzzing_option
   uint16_t data_seq_ctrl;
   uint16_t recv_data_seq_ctrl;
   time_t last_recv_pkt_time;
+  time_t last_progress_time; /* stamped on each wpa_s advance; drives stall watchdog */
   uint8_t target_alive;
 
   // uint8_t test_type;
@@ -222,6 +223,7 @@ typedef struct _fuzzing_option
   char log_file[256];
   char payload_file[256];
   char results_file[256];
+  char flow_file[256]; /* -F: generic flow table for stateful corpus injection */
 
   struct sniffed_frame sfs[MAX_SFS_COUNT];
   volatile int cur_sfs_cnt;

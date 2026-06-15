@@ -1,0 +1,13 @@
+# WPA3 SAE commit/confirm flow — owfuzz as STA, fuzzing the AP.
+# Demonstrates driving states (COMMIT_SENT / CONFIRM_SENT) that are NOT hardcoded
+# in owfuzz's C (handle_*_auth / enum wpa_states know only open/shared auth).
+# Frames are pulled from the -p corpus by @send id (sae_commit / sae_confirm),
+# so the LLM/corpusgen owns both the flow (this file) and the payloads.
+#
+# on_rx "AUTH match=24:03" = a received Authentication frame whose SAE algorithm
+# field (body offset 24) == 0x03, i.e. the AP's SAE commit/confirm reply.
+#
+# in_state    | on_rx            | send        | goto_state
+INIT          | START            | sae_commit  | COMMIT_SENT
+COMMIT_SENT   | AUTH match=24:03 | sae_confirm | CONFIRM_SENT
+CONFIRM_SENT  | AUTH match=24:03 | -           | DONE

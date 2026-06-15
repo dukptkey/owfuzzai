@@ -27,6 +27,8 @@
 #include <sys/time.h>
 #include "kismet_wifi_control.h"
 #include "frames/frame.h"
+#include "frames/corpus.h"
+#include "frames/flow.h"
 #include "common/log.h"
 #include "common/pcap_log.h"
 #include "common/config.h"
@@ -50,6 +52,7 @@ struct ow_queue owq;
 pthread_mutex_t owq_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define DEAUTH_TIME 10
+#define STALL_TIMEOUT 8 /* seconds without flow progress before the watchdog resets the flow */
 
 // Define how many packets will be captured before fuzzing starts
 #define CAPTURED_PKT_BEFORE_FUZZING 3
@@ -175,9 +178,11 @@ void usage_help(char *name)
 		   "\t-r [seed value]\n"
 		   "\t   Set the seed value for srandom, if not provided, srandom(time(NULL)..) will be used\n"
 		   "\t-p [corpus file]\n"
-		   "\t   Path to an external frame corpus to replay for the PoC test (-T 0). Overrides the default 'poc.txt'.\n"
+		   "\t   External frame corpus. For the PoC test (-T 0) it is replayed statelessly (state tags ignored, overrides 'poc.txt'); for the interactive test (-T 1) state-tagged frames are injected into the handshake (see corpus.h). Comma-separate multiple files.\n"
 		   "\t-o [results file]\n"
 		   "\t   Write a per-frame results log (TSV) for the PoC test (-T 0). 'alive'=0 marks the target going silent (OTA beacon liveness, or ping if -I is set).\n"
+		   "\t-F [flow file]\n"
+		   "\t   Generic flow table (interactive test -T 1): drives a stateful corpus through an arbitrary state machine defined in the file, not hardcoded in C (see frames/flow.h). Frames come from the -p corpus via @send ids.\n"
 		   "\t-h Help.\n",
 		   TEST_FRAME, TEST_INTERACTIVE, TEST_POC, TEST_INTERACTIVE, TEST_FRAME, TEST_INTERACTIVE_FRAME);
 }
@@ -912,6 +917,112 @@ void handle_action(struct packet *pkt, struct ether_addr bssid, struct ether_add
 {
 }
 
+/* Corpus frames carry placeholder addresses/seqno (the -T 0 replay path rewrites
+ * them in test_bad_frame; the interactive path does not). Mirror that fixup so an
+ * injected corpus frame is addressed to the configured target. */
+static void corpus_fixup_addrs(fuzzing_option *fo, struct packet *p)
+{
+	struct ieee_hdr *hdr = (struct ieee_hdr *)p->data;
+	uint8_t dsflags = hdr->flags & 0x03;
+
+	if ((hdr->type & 0x0F) == CONTROL_FRAME)
+		return;
+
+	switch (dsflags)
+	{
+	case 0x00:
+		MAC_COPY(hdr->addr1, fo->target_addr);
+		MAC_COPY(hdr->addr2, fo->source_addr);
+		MAC_COPY(hdr->addr3, fo->bssid);
+		break;
+	case 0x01:
+		MAC_COPY(hdr->addr1, fo->bssid);
+		MAC_COPY(hdr->addr2, fo->source_addr);
+		MAC_COPY(hdr->addr3, fo->target_addr);
+		break;
+	case 0x02:
+		MAC_COPY(hdr->addr1, fo->target_addr);
+		MAC_COPY(hdr->addr2, fo->bssid);
+		MAC_COPY(hdr->addr3, fo->source_addr);
+		break;
+	case 0x03:
+		MAC_COPY(hdr->addr1, fo->bssid);
+		MAC_COPY(hdr->addr2, fo->bssid);
+		MAC_COPY(hdr->addr3, fo->target_addr);
+		break;
+	}
+
+	if ((hdr->type & 0x0F) == MANAGMENT_FRAME)
+	{
+		set_seqno(p, fo->seq_ctrl + 2);
+		fo->seq_ctrl++;
+	}
+	else if ((hdr->type & 0x0F) == DATA_FRAME)
+	{
+		set_seqno(p, fo->data_seq_ctrl + 2);
+		fo->data_seq_ctrl++;
+	}
+}
+
+/* Corpus-first frame builder: in interactive mode with a corpus loaded, prefer a
+ * state-tagged corpus frame for (wpa_s, type); otherwise fall back to the
+ * built-in template via get_frame(). */
+static struct packet next_fuzz_frame(fuzzing_option *fo, uint8_t type,
+				     struct ether_addr bssid, struct ether_addr smac,
+				     struct ether_addr dmac, struct packet *recv)
+{
+	struct packet p;
+	if (fo->payload_file[0] && corpus_lookup(fo->wpa_s, type, &p))
+	{
+		corpus_fixup_addrs(fo, &p);
+		return p;
+	}
+	return get_frame(type, bssid, smac, dmac, recv);
+}
+
+/* --- Generic flow engine driver (Option B) ---------------------------------
+ * The flow table (flow.c) decides WHICH corpus frame to send and WHEN; this
+ * driver does the sending, reusing the corpus + addr-fixup plumbing. The engine
+ * is protocol-agnostic: states are arbitrary strings from the flow file, so we
+ * can drive flows (e.g. WPA3 SAE) that have no hardcoded states in C. */
+static void emit_flow_frame(fuzzing_option *fo, const char *send_id)
+{
+	struct packet p;
+	if (corpus_lookup_send(send_id, &p))
+	{
+		corpus_fixup_addrs(fo, &p);
+		p.channel = fo->channel;
+		fo->fuzz_pkt = p;
+		send_packet_ex(&p);
+	}
+}
+
+/* Spontaneous (START) send on entering a state; call once per loop iteration. */
+static void flow_drive_spontaneous(fuzzing_option *fo)
+{
+	const flow_rule_t *r = flow_start_rule();
+	if (r)
+	{
+		if (r->send_id[0])
+			emit_flow_frame(fo, r->send_id);
+		flow_set_state(r->goto_state);
+		fo->last_progress_time = time(NULL);
+	}
+}
+
+/* Reactive transition driven by a received frame. */
+static void flow_drive_reactive(fuzzing_option *fo, struct packet *rx)
+{
+	const flow_rule_t *r = flow_match_rule(rx);
+	if (r)
+	{
+		if (r->send_id[0])
+			emit_flow_frame(fo, r->send_id);
+		flow_set_state(r->goto_state);
+		fo->last_progress_time = time(NULL);
+	}
+}
+
 void handle_sta_auth(struct packet *pkt, struct ether_addr bssid, struct ether_addr smac, struct ether_addr dmac, fuzzing_option *fuzzing_opt)
 {
 	struct ieee_hdr *hdr = NULL;
@@ -974,7 +1085,7 @@ void handle_sta_auth(struct packet *pkt, struct ether_addr bssid, struct ether_a
 			fuzz_pkt = get_frame(IEEE80211_TYPE_ACK, bssid, dmac, smac, pkt);
 			send_packet_ex(&fuzz_pkt);
 			fuzzing_opt->wpa_s = WPA_AUTHENTICATING;
-			fuzz_pkt = get_frame(IEEE80211_TYPE_AUTH, bssid, dmac, smac, pkt);
+			fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_AUTH, bssid, dmac, smac, pkt);
 			fuzzing_opt->fuzz_pkt = fuzz_pkt;
 			send_packet_ex(&fuzz_pkt);
 		}
@@ -990,7 +1101,7 @@ void handle_sta_auth(struct packet *pkt, struct ether_addr bssid, struct ether_a
 			fuzzing_opt->wpa_s = WPA_ASSOCIATING;
 			fuzz_pkt = get_frame(IEEE80211_TYPE_ACK, bssid, dmac, smac, pkt);
 			send_packet_ex(&fuzz_pkt);
-			fuzz_pkt = get_default_frame(IEEE80211_TYPE_ASSOCRES, bssid, dmac, smac, pkt);
+			fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_ASSOCRES, bssid, dmac, smac, pkt);
 			fuzzing_opt->fuzz_pkt = fuzz_pkt;
 			send_packet_ex(&fuzz_pkt);
 
@@ -1006,14 +1117,14 @@ void handle_sta_auth(struct packet *pkt, struct ether_addr bssid, struct ether_a
 				fuzzing_opt->auth_type == WPA_PSK_TKIP)
 			{
 				fuzzing_opt->wpa_s = WPA_4WAY_HANDSHAKE;
-				fuzz_pkt = get_frame(IEEE80211_TYPE_QOSDATA, bssid, dmac, smac, pkt);
+				fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_QOSDATA, bssid, dmac, smac, pkt);
 				fuzzing_opt->fuzz_pkt = fuzz_pkt;
 				send_packet_ex(&fuzz_pkt);
 			}
 			else if (fuzzing_opt->auth_type == EAP_8021X)
 			{
 				fuzzing_opt->wpa_s = WPA_EAP_HANDSHAKE;
-				fuzz_pkt = get_frame(IEEE80211_TYPE_QOSDATA, bssid, dmac, smac, pkt);
+				fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_QOSDATA, bssid, dmac, smac, pkt);
 				fuzzing_opt->fuzz_pkt = fuzz_pkt;
 				send_packet_ex(&fuzz_pkt);
 			}
@@ -1031,7 +1142,7 @@ void handle_sta_auth(struct packet *pkt, struct ether_addr bssid, struct ether_a
 			fuzz_pkt = get_frame(IEEE80211_TYPE_ACK, bssid, dmac, smac, pkt);
 			send_packet_ex(&fuzz_pkt);
 
-			fuzz_pkt = get_frame(IEEE80211_TYPE_DATA, bssid, dmac, smac, pkt);
+			fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_DATA, bssid, dmac, smac, pkt);
 			fuzzing_opt->fuzz_pkt = fuzz_pkt;
 			send_packet_ex(&fuzz_pkt);
 		}
@@ -1044,7 +1155,7 @@ void handle_sta_auth(struct packet *pkt, struct ether_addr bssid, struct ether_a
 			fuzz_pkt = get_frame(IEEE80211_TYPE_ACK, bssid, dmac, smac, pkt);
 			send_packet_ex(&fuzz_pkt);
 
-			fuzz_pkt = get_frame(IEEE80211_TYPE_QOSDATA, bssid, dmac, smac, pkt);
+			fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_QOSDATA, bssid, dmac, smac, pkt);
 			fuzzing_opt->fuzz_pkt = fuzz_pkt;
 			send_packet_ex(&fuzz_pkt);
 		}
@@ -1163,7 +1274,7 @@ void handle_ap_auth(struct packet *pkt, struct ether_addr bssid, struct ether_ad
 
 					print_interaction_status(bssid, smac, dmac, "Probe Response", "");
 
-					fuzz_pkt = get_frame(IEEE80211_TYPE_AUTH, bssid, dmac, smac, pkt);
+					fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_AUTH, bssid, dmac, smac, pkt);
 					fuzzing_opt->fuzz_pkt = fuzz_pkt;
 					send_packet_ex(&fuzz_pkt);
 				}
@@ -1175,7 +1286,7 @@ void handle_ap_auth(struct packet *pkt, struct ether_addr bssid, struct ether_ad
 				fuzz_pkt = get_frame(IEEE80211_TYPE_ACK, bssid, dmac, smac, pkt);
 				send_packet_ex(&fuzz_pkt);
 
-				fuzz_pkt = get_frame(IEEE80211_TYPE_AUTH, bssid, dmac, smac, pkt);
+				fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_AUTH, bssid, dmac, smac, pkt);
 				fuzzing_opt->fuzz_pkt = fuzz_pkt;
 				if (fuzz_pkt.len)
 				{
@@ -1184,7 +1295,7 @@ void handle_ap_auth(struct packet *pkt, struct ether_addr bssid, struct ether_ad
 
 				if (fuzzing_opt->wpa_s == WPA_ASSOCIATING)
 				{
-					fuzz_pkt = get_frame(IEEE80211_TYPE_ASSOCREQ, bssid, dmac, smac, pkt);
+					fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_ASSOCREQ, bssid, dmac, smac, pkt);
 					fuzzing_opt->fuzz_pkt = fuzz_pkt;
 					send_packet_ex(&fuzz_pkt);
 
@@ -1303,7 +1414,7 @@ void handle_ap_auth(struct packet *pkt, struct ether_addr bssid, struct ether_ad
 			{
 				fuzz_pkt = get_frame(IEEE80211_TYPE_ACK, bssid, dmac, smac, pkt);
 				send_packet_ex(&fuzz_pkt);
-				fuzz_pkt = get_frame(IEEE80211_TYPE_DATA, bssid, dmac, smac, pkt);
+				fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_DATA, bssid, dmac, smac, pkt);
 				fuzzing_opt->fuzz_pkt = fuzz_pkt;
 				send_packet_ex(&fuzz_pkt);
 			}
@@ -1313,7 +1424,7 @@ void handle_ap_auth(struct packet *pkt, struct ether_addr bssid, struct ether_ad
 			{
 				fuzz_pkt = get_frame(IEEE80211_TYPE_ACK, bssid, dmac, smac, pkt);
 				send_packet_ex(&fuzz_pkt);
-				fuzz_pkt = get_frame(IEEE80211_TYPE_QOSDATA, bssid, dmac, smac, pkt);
+				fuzz_pkt = next_fuzz_frame(fuzzing_opt, IEEE80211_TYPE_QOSDATA, bssid, dmac, smac, pkt);
 				fuzzing_opt->fuzz_pkt = fuzz_pkt;
 				send_packet_ex(&fuzz_pkt);
 			}
@@ -1926,6 +2037,7 @@ void *start_fuzzing(void *param)
 	uint8_t frame_type = 0;
 	uint16_t seq_ctrl = 0;
 	uint16_t recv_seq_ctrl = 0;
+	enum wpa_states prev_wpa_s = WPA_DISCONNECTED; /* track flow progress for the stall watchdog */
 
 	struct timeval tv;
 	// uint64_t current_time;
@@ -2018,6 +2130,45 @@ void *start_fuzzing(void *param)
 		// gettimeofday(&tv2,NULL);
 		current_time2 = tv.tv_sec * 1000 + tv.tv_usec / 1000;
 		fuzz_current_time2 = tv.tv_sec * 1000 + tv.tv_usec / 1000;
+
+		/* Track flow progress: whenever the interactive FSM advances wpa_s,
+		 * stamp the time so the stall watchdog below can detect a wedged flow. */
+		if (fuzzing_opt->wpa_s != prev_wpa_s)
+		{
+			fuzzing_opt->last_progress_time = time(NULL);
+			prev_wpa_s = fuzzing_opt->wpa_s;
+		}
+
+		/* Stall watchdog (stateful corpus mode): read_packet_ex() never blocks,
+		 * so a never-arriving reply can't hang us, but the flow can stall mid-
+		 * handshake. If it hasn't advanced for STALL_TIMEOUT, reset so the flow
+		 * restarts and the un-reached state gets another attempt. Covers both the
+		 * classic handlers (track wpa_s) and the generic flow engine (track its
+		 * own state); in flow mode we also restart on completion to keep hammering. */
+		if (fuzzing_opt->test_type == TEST_INTERACTIVE && fuzzing_opt->payload_file[0] &&
+			fuzzing_opt->last_progress_time != 0 &&
+			(time(NULL) - fuzzing_opt->last_progress_time) > STALL_TIMEOUT &&
+			(flow_loaded() ||
+			 (fuzzing_opt->wpa_s != WPA_COMPLETED && fuzzing_opt->wpa_s != WPA_DISCONNECTED)))
+		{
+			struct packet dpkt;
+			fuzz_logger_log(FUZZ_LOG_INFO, "[watchdog] flow stalled (state '%s'/wpa %d) -> reset",
+							flow_loaded() ? flow_cur_state() : "-", fuzzing_opt->wpa_s);
+			dpkt = get_frame(IEEE80211_TYPE_DEAUTH, fuzzing_opt->bssid, fuzzing_opt->source_addr, fuzzing_opt->target_addr, NULL);
+			send_packet_ex(&dpkt);
+			dpkt = get_frame(IEEE80211_TYPE_DISASSOC, fuzzing_opt->bssid, fuzzing_opt->source_addr, fuzzing_opt->target_addr, NULL);
+			send_packet_ex(&dpkt);
+			if (flow_loaded())
+				flow_reset();
+			else
+				fuzzing_opt->wpa_s = WPA_DISCONNECTED;
+			fuzzing_opt->last_progress_time = time(NULL);
+		}
+
+		/* Generic flow engine: fire any spontaneous (START) send for the current
+		 * state every iteration (runs even when no frame was received). */
+		if (flow_loaded())
+			flow_drive_spontaneous(fuzzing_opt);
 
 		/*if((current_time - pass_time >= DEAUTH_TIME) && fuzzing_opt->test_type == TEST_INTERACTIVE)
 		{
@@ -2525,7 +2676,11 @@ void *start_fuzzing(void *param)
 
 			if (TEST_INTERACTIVE == fuzzing_opt->test_type)
 			{
-				if (FUZZ_WORK_MODE_AP == fuzzing_opt->fuzz_work_mode)
+				if (flow_loaded())
+				{
+					flow_drive_reactive(fuzzing_opt, &pkt);
+				}
+				else if (FUZZ_WORK_MODE_AP == fuzzing_opt->fuzz_work_mode)
 				{
 					handle_sta_auth(&pkt, bssid, smac, dmac, fuzzing_opt);
 				}
@@ -2586,7 +2741,11 @@ void *start_fuzzing(void *param)
 
 			if (TEST_INTERACTIVE == fuzzing_opt->test_type)
 			{
-				if (FUZZ_WORK_MODE_AP == fuzzing_opt->fuzz_work_mode)
+				if (flow_loaded())
+				{
+					flow_drive_reactive(fuzzing_opt, &pkt);
+				}
+				else if (FUZZ_WORK_MODE_AP == fuzzing_opt->fuzz_work_mode)
 				{
 					handle_sta_auth(&pkt, bssid, smac, dmac, fuzzing_opt);
 				}
@@ -2838,7 +2997,7 @@ int fuzzing(int argc, char *argv[])
 
 	if (argc > 1)
 	{
-		while ((c = getopt(argc, argv, "m:i:t:s:b:I:c:hS:A:T:l:f:r:p:o:")) < 255)
+		while ((c = getopt(argc, argv, "m:i:t:s:b:I:c:hS:A:T:l:f:r:p:o:F:")) < 255)
 		{
 			switch (c)
 			{
@@ -2967,6 +3126,9 @@ int fuzzing(int argc, char *argv[])
 				break;
 			case 'o':
 				strncpy(fuzzing_opt.results_file, optarg, sizeof(fuzzing_opt.results_file) - 1);
+				break;
+			case 'F':
+				strncpy(fuzzing_opt.flow_file, optarg, sizeof(fuzzing_opt.flow_file) - 1);
 				break;
 			default:
 				fuzz_logger_log(FUZZ_LOG_ERR, "Unknow option %c!", c);
@@ -3200,6 +3362,18 @@ int fuzzing(int argc, char *argv[])
 
 	fuzzing_opt.target_alive = 1;
 	fuzzing_opt.p2p_frame_test = 0;
+
+	if (TEST_INTERACTIVE == fuzzing_opt.test_type && fuzzing_opt.payload_file[0])
+	{
+		corpus_load(fuzzing_opt.payload_file);
+	}
+
+	if (TEST_INTERACTIVE == fuzzing_opt.test_type && fuzzing_opt.flow_file[0])
+	{
+		if (!fuzzing_opt.payload_file[0])
+			fuzz_logger_log(FUZZ_LOG_WARN, "-F flow given without -p corpus; flow has no frames to send.");
+		flow_load(fuzzing_opt.flow_file);
+	}
 
 	if (TEST_POC == fuzzing_opt.test_type)
 	{
