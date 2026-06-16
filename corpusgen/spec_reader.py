@@ -66,6 +66,54 @@ FRAME_SCHEMA = {
 }
 
 
+# Structured-output schema for a stateful HANDSHAKE: the frames the STA sends plus the
+# transition table driving them. This is what makes the flow itself spec-derived (Option B)
+# rather than hardcoded in owfuzz's C. `frames[]` reuse the per-frame shape (+ send_id);
+# `transitions[]` render to the pipe-delimited .flow format owfuzz/src/frames/flow.c parses.
+FLOW_FRAME_ITEM = {
+    "type": "object",
+    "properties": {
+        "frame_name": {"type": "string"},
+        "send_id": {"type": "string", "description": "short stable id reused verbatim in transitions[].send"},
+        "subtype": {"type": "integer"},
+        "type": {"type": "string", "description": "802.11 frame type name, e.g. AUTH"},
+        "fixed": {"type": "string", "description": "baseline hex of the concatenated fixed fields in order ('' if none)"},
+        "ies": FRAME_SCHEMA["properties"]["ies"],
+        "notes": {"type": "string"},
+    },
+    "required": ["frame_name", "send_id", "subtype", "type", "fixed", "ies", "notes"],
+    "additionalProperties": False,
+}
+
+FLOW_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "handshake": {"type": "string"},
+        "frames": {"type": "array", "items": FLOW_FRAME_ITEM},
+        "transitions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "in_state": {"type": "string"},
+                    "on_rx": {"type": "string", "description": "'START' (fires on entering in_state, no rx) or an 802.11 type NAME of the frame that must be received, e.g. AUTH"},
+                    "match_offset": {"type": "integer", "description": "octet offset FROM FRAME START (the 24-byte MAC header is included, so the body begins at offset 24) of a byte to match in the received frame; -1 for no byte predicate"},
+                    "match_byte": {"type": "string", "description": "the required byte at match_offset as exactly 2 hex digits, '' when match_offset is -1"},
+                    "send": {"type": "string", "description": "send_id of the frame to transmit when this rule fires, or '' to send nothing"},
+                    "goto_state": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+                "required": ["in_state", "on_rx", "match_offset", "match_byte", "send", "goto_state", "notes"],
+                "additionalProperties": False,
+            },
+        },
+        "notes": {"type": "string"},
+    },
+    "required": ["handshake", "frames", "transitions", "notes"],
+    "additionalProperties": False,
+}
+
+
 def build_system(spec_text):
     # Stable, cacheable prefix: fixed instructions + spec text. The cache_control marker
     # on the spec block caches instructions+spec together, reused across per-frame calls.
@@ -120,6 +168,90 @@ def extract_frame(client, model, system_blocks, frame_name):
     return json.loads(text), resp.usage
 
 
+def flow_user_prompt(handshake):
+    return (
+        f"From the specification text, extract the message-exchange STATE MACHINE for the "
+        f"{handshake} handshake, with owfuzz acting as the initiating station (STA) that "
+        "fuzzes the peer/AP. Produce TWO coordinated outputs:\n"
+        "1) 'frames': every distinct frame the STA SENDS during the handshake, each as a frame "
+        "schema — frame_name, a short stable 'send_id' (reused VERBATIM in the transitions' "
+        "'send' column), the 802.11 frame subtype (integer) and 'type' NAME (e.g. AUTH), the "
+        "fixed-field portion as baseline hex, and any IEs (PAYLOAD-ONLY values per the rules "
+        "above). For SAE these are Authentication frames (type AUTH, subtype 11) whose body "
+        "carries the SAE algorithm number, transaction sequence, status, and the group/scalar/"
+        "element (commit) or send-confirm/confirm (confirm) fields — put the whole body in "
+        "'fixed' with no IEs.\n"
+        "2) 'transitions': the ordered rules that drive the handshake. Each rule = (in_state, "
+        "on_rx, match_offset, match_byte, send, goto_state). 'on_rx' is the literal 'START' for "
+        "a rule that fires spontaneously on entering in_state (no received frame), otherwise the "
+        "802.11 type NAME of the frame that must be received to fire the rule. 'match_offset' is "
+        "an octet offset FROM THE FRAME START — the 24-octet MAC header is included, so the frame "
+        "BODY begins at offset 24; use it with 'match_byte' (2 hex digits) to require a specific "
+        "byte in the received frame (e.g. the SAE algorithm low byte 0x03 sits at offset 24), or "
+        "set match_offset=-1 and match_byte='' for no byte predicate. 'send' = the send_id of the "
+        "frame to transmit, or '' to send nothing. 'goto_state' = the next state.\n"
+        "Use INIT as the entry (start) state and DONE as the terminal state; keep state names "
+        "short UPPER_SNAKE_CASE. Summarize the handshake in the top-level 'notes'."
+    )
+
+
+def extract_flow(client, model, system_blocks, handshake):
+    resp = client.messages.create(
+        model=model,
+        max_tokens=16000,
+        thinking={"type": "adaptive"},
+        system=system_blocks,
+        messages=[{"role": "user", "content": flow_user_prompt(handshake)}],
+        output_config={"effort": "high", "format": {"type": "json_schema", "schema": FLOW_SCHEMA}},
+    )
+    text = next(b.text for b in resp.content if b.type == "text")
+    return json.loads(text), resp.usage
+
+
+def render_flow(extracted):
+    """Render an extracted flow into the pipe-delimited text owfuzz/src/frames/flow.c parses:
+    `in_state | on_rx[ match=OFF:HH] | send|- | goto_state`."""
+    lines = [
+        "# %s flow — generated by spec_reader from spec text." % extracted.get("handshake", "handshake"),
+        "# owfuzz drives these states (NOT hardcoded in its C); frames come from the -p corpus",
+        "# by @send id. on_rx 'TYPE match=OFF:HH' = a received TYPE frame whose byte at offset OFF",
+        "# (from frame start, MAC header included) == 0xHH.",
+        "#",
+        "# in_state    | on_rx            | send        | goto_state",
+    ]
+    for t in extracted.get("transitions", []):
+        onrx = (t.get("on_rx") or "START").strip()
+        if onrx != "START":
+            off = int(t.get("match_offset", -1))
+            mb = clean_hex(t.get("match_byte", ""))
+            if off >= 0 and mb:
+                onrx = "%s match=%d:%s" % (onrx, off, mb)
+        send = (t.get("send") or "").strip() or "-"
+        lines.append("%-13s | %-16s | %-11s | %s" % (
+            t["in_state"].strip(), onrx, send, t["goto_state"].strip()))
+    return "\n".join(lines) + "\n"
+
+
+def merge_flow_frames(schema, extracted):
+    """Normalize the handshake frames into the schema (keyed by frame_name, carrying send_id),
+    and validate that every transition's 'send' references a frame. Returns warnings."""
+    warnings = []
+    send_ids = set()
+    for fr in extracted.get("frames", []):
+        name = fr.get("frame_name") or fr.get("send_id")
+        fr.setdefault("send_id", name)
+        entry, warns = normalize(name, fr)
+        entry.setdefault("send_id", fr["send_id"])
+        schema[name] = entry
+        send_ids.add(entry["send_id"])
+        warnings += warns
+    for t in extracted.get("transitions", []):
+        s = (t.get("send") or "").strip()
+        if s and s not in send_ids:
+            warnings.append("flow: transition send '%s' has no matching frame send_id" % s)
+    return warnings
+
+
 def normalize(frame_key, extracted):
     """Coerce one extraction into the synthesizer's schema entry + collect warnings."""
     warnings = []
@@ -149,6 +281,13 @@ def normalize(frame_key, extracted):
             "value": v,
         })
     entry = {"subtype": int(extracted["subtype"]), "fixed": fixed, "ies": ies}
+    # Handshake-frame extras (flow path): the send id that ties this frame to a flow
+    # rule's `send` column, plus optional corpus state/type tags. Absent on the normal
+    # per-family path, so they only appear when the model supplies them.
+    for k in ("send_id", "state", "type"):
+        v = extracted.get(k)
+        if v:
+            entry[k] = v
     return entry, warnings
 
 
@@ -186,6 +325,21 @@ def run(args):
         warnings += warns
         notes_parts.append(render_notes(frame, extracted))
         print("extracted %-16s ies=%d  (%s)" % (frame, len(entry["ies"]), meta), file=sys.stderr)
+
+    if args.flow:
+        if args.backend == "api":
+            flow_extracted, usage = extract_flow(client, args.model, system_blocks, args.handshake)
+            meta = "cache_read=%s input=%s" % (usage.cache_read_input_tokens, usage.input_tokens)
+        else:
+            flow_extracted = llm_cli.complete_json(system_text, flow_user_prompt(args.handshake), FLOW_SCHEMA)
+            meta = "via claude CLI"
+        warnings += merge_flow_frames(schema, flow_extracted)
+        with open(args.flow, "w") as f:
+            f.write(render_flow(flow_extracted))
+        notes_parts.append("## flow: %s\n%s\n" % (args.handshake, flow_extracted.get("notes", "")))
+        print("extracted flow %-12s frames=%d transitions=%d -> %s  (%s)" % (
+            args.handshake, len(flow_extracted.get("frames", [])),
+            len(flow_extracted.get("transitions", [])), args.flow, meta), file=sys.stderr)
 
     write_outputs(schema, "\n".join(notes_parts), args.out, args.notes)
     for w in warnings:
@@ -230,13 +384,58 @@ def self_test():
     loaded = synthesizer.load_schema("/tmp/_st_schema.spec")
     frames = synthesizer.generate(loaded)
     assert frames and frames[0][1][0] == synthesizer.fc_byte0(8), "schema not synthesizer-compatible"
-    print("self-test OK: %d frames synthesizable from extracted schema" % len(frames), file=sys.stderr)
+
+    # --- flow path (Option B): merge handshake frames + render the .flow, offline ---
+    flow_canned = {
+        "handshake": "WPA3 SAE commit/confirm",
+        "frames": [
+            {"frame_name": "sae_commit", "send_id": "sae_commit", "subtype": 11, "type": "AUTH",
+             "fixed": "0300010000001300" + "11" * 96, "ies": [], "notes": "SAE commit"},
+            {"frame_name": "sae_confirm", "send_id": "sae_confirm", "subtype": 11, "type": "AUTH",
+             "fixed": "030002000000" + "33" * 32, "ies": [], "notes": "SAE confirm"},
+        ],
+        "transitions": [
+            {"in_state": "INIT", "on_rx": "START", "match_offset": -1, "match_byte": "",
+             "send": "sae_commit", "goto_state": "COMMIT_SENT", "notes": "send commit on entry"},
+            {"in_state": "COMMIT_SENT", "on_rx": "AUTH", "match_offset": 24, "match_byte": "03",
+             "send": "sae_confirm", "goto_state": "CONFIRM_SENT", "notes": "AP commit reply"},
+            {"in_state": "CONFIRM_SENT", "on_rx": "AUTH", "match_offset": 24, "match_byte": "03",
+             "send": "", "goto_state": "DONE", "notes": "AP confirm"},
+        ],
+        "notes": "SAE small-group commit/confirm.",
+    }
+    flow_schema = {}
+    fwarns = merge_flow_frames(flow_schema, flow_canned)
+    assert not fwarns, fwarns
+    assert flow_schema["sae_commit"]["send_id"] == "sae_commit", flow_schema
+    # an undefined send is flagged
+    assert merge_flow_frames({}, {"frames": [], "transitions": [
+        {"in_state": "INIT", "on_rx": "START", "match_offset": -1, "match_byte": "",
+         "send": "ghost", "goto_state": "X", "notes": ""}]}), "undefined send not flagged"
+    rendered = render_flow(flow_canned)
+    # the byte predicate renders in flow.c's OFF:HH form, and the spontaneous rule has no match=
+    assert "AUTH match=24:03" in rendered, rendered
+    rule_lines = [l for l in rendered.splitlines() if l and not l.startswith("#")]
+    assert len(rule_lines) == 3 and rule_lines[0].split("|")[1].strip() == "START", rule_lines
+
+    # synthesizer emits @send from the schema-provided send_id (no hardcoded name dependency)
+    write_outputs(flow_schema, "", "/tmp/_st_sae_schema.spec", "/tmp/_st_sae_notes.txt")
+    sae_loaded = synthesizer.load_schema("/tmp/_st_sae_schema.spec")
+    synthesizer.write_corpus(synthesizer.generate(sae_loaded), "/tmp/_st_sae_corpus.txt", schema=sae_loaded)
+    with open("/tmp/_st_sae_corpus.txt") as f:
+        corpus_txt = f.read()
+    assert "@send=sae_commit" in corpus_txt and "@send=sae_confirm" in corpus_txt, corpus_txt
+
+    print("self-test OK: %d frames synthesizable; flow renders %d rules + @send corpus"
+          % (len(frames), len(rule_lines)), file=sys.stderr)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Spec-Reader: 802.11 spec text -> frame/IE schema via Claude")
     ap.add_argument("--spec", help="path to 802.11 management-frame spec text")
-    ap.add_argument("--frames", default=DEFAULT_FRAMES, help="comma-separated frame families")
+    ap.add_argument("--frames", default=DEFAULT_FRAMES, help="comma-separated frame families ('' to skip and do flow only)")
+    ap.add_argument("--flow", help="also extract a stateful handshake flow -> this .flow file (Option B)")
+    ap.add_argument("--handshake", default="WPA3 SAE commit/confirm", help="handshake to extract for --flow")
     ap.add_argument("--out", default="schema.spec", help="schema output (JSON content)")
     ap.add_argument("--notes", default="spec_notes.txt", help="natural-language notes output")
     ap.add_argument("--model", default=DEFAULT_MODEL, help="API backend model (ignored by --backend cli)")

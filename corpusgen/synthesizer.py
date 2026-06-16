@@ -225,15 +225,23 @@ def load_plan(path):
         return json.load(f)
 
 
-def write_corpus(frames, output, write_labels=False):
+def write_corpus(frames, output, schema=None, write_labels=False):
+    # Tags prefer schema-provided state/type/send_id (Spec-Reader-emitted) over the
+    # built-in STATE_TYPE_MAP/SEND_ID_MAP, so handshake frames the LLM names from the
+    # spec don't depend on a hardcoded family-name list.
+    schema = schema or {}
     with open(output, "w") as f:
         for label, raw in frames:
             family = label.split("/", 1)[0]
+            entry = schema.get(family, {})
             toks = []
-            st = STATE_TYPE_MAP.get(family)
+            if entry.get("state") and entry.get("type"):
+                st = (entry["state"], entry["type"])
+            else:
+                st = STATE_TYPE_MAP.get(family)
             if st:
                 toks.append("@state=%s @type=%s" % st)
-            sid = SEND_ID_MAP.get(family)
+            sid = entry.get("send_id") or SEND_ID_MAP.get(family)
             if sid:
                 toks.append("@send=%s" % sid)
             if toks:
@@ -270,7 +278,7 @@ def main():
     schema = load_schema(args.schema) if args.schema else sample_schema()
     plan = load_plan(args.plan) if args.plan else None
     frames = generate(schema, plan)
-    write_corpus(frames, args.output, write_labels=args.labels)
+    write_corpus(frames, args.output, schema=schema, write_labels=args.labels)
     print("wrote %d frames -> %s" % (len(frames), args.output), file=sys.stderr)
 
 

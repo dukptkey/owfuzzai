@@ -1,0 +1,36 @@
+IEEE 802.11 SAE (WPA3) Authentication — structural summary (paraphrased, for tooling smoke tests)
+
+SAE overview. Simultaneous Authentication of Equals (SAE) replaces the WPA2
+4-way-handshake pre-authentication with a balanced password-authenticated key
+exchange carried inside 802.11 Authentication frames (subtype 11). The
+Authentication Algorithm Number field is set to 3 (SAE). Authentication is a
+two-message exchange in each direction: a Commit message (Authentication
+Transaction Sequence Number 1) followed by a Confirm message (Transaction
+Sequence Number 2). A station and its peer each send a Commit, then each send a
+Confirm; the exchange is symmetric, so an initiating STA sends Commit first and,
+on receiving the peer's Commit, sends Confirm.
+
+Authentication frame fixed fields, in order: Authentication Algorithm Number
+(2 octets; 3 = SAE), Authentication Transaction Sequence Number (2 octets;
+1 = Commit, 2 = Confirm), Status Code (2 octets; 0 = success).
+
+SAE Commit message (Transaction Sequence 1). Following the three fixed fields,
+the body carries: Finite Cyclic Group (2 octets; an IANA group identifier, e.g.
+19 for a 256-bit elliptic-curve group), the Scalar (length of the group's order,
+e.g. 32 octets for group 19), and the Finite Field Element (two coordinates,
+e.g. 64 octets for group 19). For a 256-bit group the Commit body after the
+fixed fields is therefore Group(2) + Scalar(32) + Element(64) = 98 octets.
+
+SAE Confirm message (Transaction Sequence 2). Following the three fixed fields,
+the body carries: Send-Confirm (2 octets, a counter) and the Confirm value (a
+hash output the length of the negotiated group's hash, e.g. 32 octets for a
+SHA-256 group). The Confirm body after the fixed fields is Send-Confirm(2) +
+Confirm(32) = 34 octets.
+
+Exchange / state usage. The initiating STA transmits its Commit (algorithm 3,
+sequence 1). It then waits to receive the peer's Commit (an Authentication frame
+with algorithm 3). On receiving the peer Commit it transmits its Confirm
+(algorithm 3, sequence 2) and waits for the peer's Confirm (algorithm 3,
+sequence 2), after which the SAE exchange is complete and the STA proceeds to
+Association. The SAE algorithm number (3) appears in the Authentication
+Algorithm Number field, the first fixed field of the frame body.

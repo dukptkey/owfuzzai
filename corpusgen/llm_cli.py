@@ -36,8 +36,11 @@ def complete_json(system_text, user_text, schema, model=None, timeout=600, retri
     prompt = (
         system_text + "\n\n" + user_text + "\n\n"
         "Respond with a SINGLE JSON object and nothing else — no markdown fences, no "
-        "commentary, no tool use. Everything you need is in this prompt. The object MUST "
-        "validate against this JSON Schema:\n" + json.dumps(schema)
+        "commentary, no tool use. Every value must be a plain JSON literal — NEVER code, "
+        "expressions, concatenation, or method calls (e.g. do not write \"abc\".replace(...) "
+        "or \"ab\"+\"cd\"); write each hex string out in full as one literal. Everything you "
+        "need is in this prompt. The object MUST validate against this JSON Schema:\n"
+        + json.dumps(schema)
     )
     cmd = ["claude", "-p", "--output-format", "json"]
     if model:
