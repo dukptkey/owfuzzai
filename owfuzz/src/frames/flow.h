@@ -52,4 +52,7 @@ const flow_rule_t *flow_start_rule(void);
 /* Reactive rule matching the current state and a received frame, or NULL. */
 const flow_rule_t *flow_match_rule(struct packet *rx);
 
+/* REPEAT rule for the current state (fires every loop iteration; no once-guard), or NULL. */
+const flow_rule_t *flow_repeat_rule(void);
+
 #endif /* FLOW_H */

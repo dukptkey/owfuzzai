@@ -79,6 +79,8 @@ int flow_load(const char *path)
 		onrx = trim(fields[1]);
 		if (!strcmp(onrx, "START")) {
 			r->on_rx_type = 0xFF;
+		} else if (!strcmp(onrx, "REPEAT")) {
+			r->on_rx_type = 0xFE;   /* fires every main-loop iteration while in_state */
 		} else {
 			unsigned int off, hb;
 			if (sscanf(onrx, "%31s", tyname) == 1)
@@ -139,6 +141,18 @@ const flow_rule_t *flow_start_rule(void)
 			return &g_rules[i];
 		}
 	}
+	return NULL;
+}
+
+/* A REPEAT rule for the current state (no once-guard) — fires every loop iteration.
+ * Used for a post-handshake state that keeps emitting (encrypted) fuzz frames, which
+ * both fuzzes the post-association surface and keeps the STA alive. */
+const flow_rule_t *flow_repeat_rule(void)
+{
+	int i;
+	for (i = 0; i < g_nrules; i++)
+		if (g_rules[i].on_rx_type == 0xFE && !strcmp(g_rules[i].in_state, g_cur))
+			return &g_rules[i];
 	return NULL;
 }
 

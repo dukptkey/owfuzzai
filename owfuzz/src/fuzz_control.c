@@ -30,6 +30,7 @@
 #include "frames/corpus.h"
 #include "frames/flow.h"
 #include "frames/eapol_crypto.h"
+#include "frames/ccmp.h"
 #include "common/log.h"
 #include "common/pcap_log.h"
 #include "common/config.h"
@@ -988,17 +989,51 @@ static struct packet next_fuzz_frame(fuzzing_option *fo, uint8_t type,
  * driver does the sending, reusing the corpus + addr-fixup plumbing. The engine
  * is protocol-agnostic: states are arbitrary strings from the flow file, so we
  * can drive flows (e.g. WPA3 SAE) that have no hardcoded states in C. */
+/* A data frame whose payload is EAPOL (LLC/SNAP ethertype 0x888E) is a handshake
+ * frame (signed, sent in the clear); any other data frame is post-association traffic
+ * to CCMP-encrypt once a TK exists. */
+static const uint8_t LLC_EAPOL_SIG[8] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8e };
+static int frame_is_eapol(const struct packet *p)
+{
+	unsigned int i, lim = p->len < 40 ? p->len : 40;
+	for (i = 0; i + 8 <= lim; i++)
+		if (memcmp(p->data + i, LLC_EAPOL_SIG, 8) == 0)
+			return 1;
+	return 0;
+}
+
+/* Monotonic 48-bit CCMP Packet Number, big-endian PN5..PN0 (as ccmp_protect wants). */
+static void ccmp_next_pn(uint8_t pn[6])
+{
+	static uint64_t c = 1;
+	pn[0] = (c >> 40) & 0xff; pn[1] = (c >> 32) & 0xff; pn[2] = (c >> 24) & 0xff;
+	pn[3] = (c >> 16) & 0xff; pn[4] = (c >> 8) & 0xff;  pn[5] = c & 0xff;
+	c++;
+}
+
 static void emit_flow_frame(fuzzing_option *fo, const char *send_id)
 {
 	struct packet p;
 	if (corpus_lookup_send(send_id, &p))
 	{
+		uint8_t tk[16];
 		corpus_fixup_addrs(fo, &p);
 		/* -K: if this is an EAPOL M2/M4, write a valid SNonce + MIC over the
 		 * (possibly fuzzed) frame so the AP accepts it and the handshake advances. */
 		if (eapol_crypto_enabled())
 			eapol_crypto_sign(p.data, p.len, fo->bssid.ether_addr_octet,
 					  fo->source_addr.ether_addr_octet);
+		/* Post-association: a non-EAPOL data frame is CCMP-encrypted with the session
+		 * TK (derived during the 4-way) so the AP decrypts and parses it. */
+		if ((p.data[0] & 0x0c) == 0x08 && !frame_is_eapol(&p) && eapol_crypto_get_tk(tk))
+		{
+			static unsigned char enc[MAX_IEEE_PACKET_SIZE];
+			uint8_t pn[6];
+			int el;
+			ccmp_next_pn(pn);
+			el = ccmp_protect(tk, p.data, (int)p.len, pn, enc);
+			if (el > 0 && el <= (int)sizeof(enc)) { memcpy(p.data, enc, el); p.len = el; }
+		}
 		p.channel = fo->channel;
 		fo->fuzz_pkt = p;
 		send_packet_ex(&p);
@@ -1014,6 +1049,20 @@ static void flow_drive_spontaneous(fuzzing_option *fo)
 		if (r->send_id[0])
 			emit_flow_frame(fo, r->send_id);
 		flow_set_state(r->goto_state);
+		fo->last_progress_time = time(NULL);
+	}
+}
+
+/* REPEAT rule: in a post-handshake state, re-emit the (encrypted) fuzz frame every
+ * loop iteration — fuzzes the post-association surface and keeps the STA alive
+ * (updating last_progress_time so the stall-watchdog never resets the flow). */
+static void flow_drive_repeat(fuzzing_option *fo)
+{
+	const flow_rule_t *r = flow_repeat_rule();
+	if (r && r->send_id[0])
+	{
+		emit_flow_frame(fo, r->send_id);
+		flow_set_state(r->goto_state);   /* usually the same state -> no-op */
 		fo->last_progress_time = time(NULL);
 	}
 }
@@ -2180,7 +2229,10 @@ void *start_fuzzing(void *param)
 		/* Generic flow engine: fire any spontaneous (START) send for the current
 		 * state every iteration (runs even when no frame was received). */
 		if (flow_loaded())
+		{
 			flow_drive_spontaneous(fuzzing_opt);
+			flow_drive_repeat(fuzzing_opt);
+		}
 
 		/*if((current_time - pass_time >= DEAUTH_TIME) && fuzzing_opt->test_type == TEST_INTERACTIVE)
 		{

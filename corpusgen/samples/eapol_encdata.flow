@@ -1,0 +1,13 @@
+# WPA2 4-way handshake + post-association ENCRYPTED-DATA fuzzing.
+# Needs -K (to derive the TK) and the NIC in active-monitor mode (hardware ACKs so
+# the AP completes the handshake -> installs the TK). After M4, FUZZ_DATA repeatedly
+# sends @send=encdata frames, which owfuzz CCMP-encrypts with the session TK; this
+# fuzzes the encrypted-data parser AND keeps the STA alive (watchdog stays armed).
+#
+# in_state    | on_rx               | send       | goto_state
+INIT          | START               | auth_open  | WAIT_AUTH
+WAIT_AUTH     | AUTH                | assoc_req  | WAIT_ASSOC
+WAIT_ASSOC    | ASSOCRES            | -          | WAIT_M1
+WAIT_M1       | QOSDATA match=40:8a | m2         | WAIT_M3
+WAIT_M3       | QOSDATA match=40:ca | m4         | FUZZ_DATA
+FUZZ_DATA     | REPEAT              | encdata    | FUZZ_DATA
