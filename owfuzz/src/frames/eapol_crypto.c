@@ -145,8 +145,9 @@ static void sha1_prf(const uint8_t *key, size_t klen, const char *label,
 #define EK_KEYINFO 5
 #define EK_NONCE   17
 #define EK_MIC     81
-#define KEY_INFO_MIC 0x0100  /* bit 8 (hi byte 0x01) */
-#define KEY_INFO_ACK 0x0080  /* bit 7 (lo byte 0x80) */
+#define KEY_INFO_MIC    0x0100  /* bit 8  (hi byte 0x01) */
+#define KEY_INFO_ACK    0x0080  /* bit 7  (lo byte 0x80) */
+#define KEY_INFO_SECURE 0x0200  /* bit 9  (hi byte 0x02): set in M3/M4, clear in M1/M2 */
 
 static const uint8_t LLC_EAPOL[8] = { 0xaa, 0xaa, 0x03, 0x00, 0x00, 0x00, 0x88, 0x8e };
 
@@ -166,8 +167,20 @@ static uint16_t key_info(const uint8_t *ek)
 }
 
 /* ---------------- state ---------------- */
-static int g_enabled, g_anonce_set, g_need_derive;
-static uint8_t g_pmk[32], g_anonce[32], g_snonce[32], g_kck[16];
+#define EK_REPLAY 9   /* 8-byte Key Replay Counter, within the EAPOL body */
+static int g_enabled, g_anonce_set, g_need_derive, g_replay_set, g_dbg;
+static uint8_t g_pmk[32], g_anonce[32], g_snonce[32], g_kck[16], g_replay[8];
+
+#include <stdio.h>
+static void dbg(const char *tag, const uint8_t *ek)
+{
+	if (!g_dbg) return;
+	fprintf(stderr, "[eapol] %s keyinfo=%02x%02x replay=%02x%02x%02x%02x%02x%02x%02x%02x anonce=%d\n",
+		tag, ek[EK_KEYINFO], ek[EK_KEYINFO + 1],
+		ek[EK_REPLAY], ek[EK_REPLAY + 1], ek[EK_REPLAY + 2], ek[EK_REPLAY + 3],
+		ek[EK_REPLAY + 4], ek[EK_REPLAY + 5], ek[EK_REPLAY + 6], ek[EK_REPLAY + 7],
+		g_anonce_set);
+}
 
 int eapol_crypto_enabled(void) { return g_enabled; }
 
@@ -179,7 +192,8 @@ int eapol_crypto_init(const char *psk, const char *ssid)
 	pbkdf2_sha1(psk, (const uint8_t *)ssid, strlen(ssid), 4096, g_pmk, 32);
 	srandom((unsigned)time(NULL) ^ (unsigned)(size_t)psk);
 	for (i = 0; i < 32; i++) g_snonce[i] = (uint8_t)(random() & 0xff);
-	g_enabled = 1; g_anonce_set = 0; g_need_derive = 0;
+	g_enabled = 1; g_anonce_set = 0; g_need_derive = 0; g_replay_set = 0;
+	g_dbg = getenv("EAPOL_DEBUG") != NULL;
 	return 1;
 }
 
@@ -188,6 +202,10 @@ void eapol_crypto_observe(const uint8_t *frame, int len)
 	int o = eapol_off(frame, len);
 	if (o < 0 || o + EK_NONCE + 32 > len) return;
 	if (frame[o + 1] != 0x03) return;                    /* EAPOL type = Key */
+	/* Echo the live Key Replay Counter back in the next M2/M4 (M1/M3 both carry it). */
+	memcpy(g_replay, frame + o + EK_REPLAY, 8);
+	g_replay_set = 1;
+	dbg("observe", frame + o);
 	if (!(key_info(frame + o) & KEY_INFO_ACK)) return;   /* M1/M3 carry ANonce */
 	memcpy(g_anonce, frame + o + EK_NONCE, 32);
 	g_anonce_set = 1; g_need_derive = 1;
@@ -220,8 +238,12 @@ void eapol_crypto_sign(uint8_t *frame, int len, const uint8_t *aa, const uint8_t
 	if (!g_anonce_set) return;                            /* need the AP's ANonce first */
 
 	if (g_need_derive) derive_ptk(aa, spa);
-	memcpy(frame + o + EK_NONCE, g_snonce, 32);           /* our SNonce */
+	if (g_replay_set) memcpy(frame + o + EK_REPLAY, g_replay, 8);  /* echo live replay counter */
+	/* M2 carries the SNonce; M4 (Secure set) carries a zero nonce — leave the template's. */
+	if (!(key_info(frame + o) & KEY_INFO_SECURE))
+		memcpy(frame + o + EK_NONCE, g_snonce, 32);
 	memset(frame + o + EK_MIC, 0, 16);                    /* MIC computed over zeroed field */
 	hmac_sha1(g_kck, 16, frame + o, len - o, mac);        /* HMAC-SHA1 over the EAPOL frame */
 	memcpy(frame + o + EK_MIC, mac, 16);                  /* key-descriptor v2 -> first 16 bytes */
+	dbg("sign", frame + o);
 }
