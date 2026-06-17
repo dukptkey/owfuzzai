@@ -156,9 +156,11 @@ int ccmp_protect(const uint8_t tk[16], const uint8_t *in, int ilen, const uint8_
 	memcpy(nonce + 1, a2, 6);
 	memcpy(nonce + 7, pn, 6);
 
-	/* AAD (non-QoS, no A4) = FC(masked) | A1 | A2 | A3 | SC(seq masked) */
-	aad[0] = in[0];
-	aad[1] = (uint8_t)(in[1] & ~0x38);          /* clear Retry/PwrMgmt/MoreData */
+	/* AAD (non-QoS, no A4) = FC(masked) | A1 | A2 | A3 | SC(seq masked).
+	 * FC mask per 802.11: clear Subtype bits 4-6 (non-mgmt) and Retry/PwrMgmt/MoreData;
+	 * the Protected Frame bit is set to 1 (the AAD covers the protected frame). */
+	aad[0] = (uint8_t)(in[0] & ~0x70);
+	aad[1] = (uint8_t)((in[1] | 0x40) & ~0x38);
 	memcpy(aad + 2, a1, 6);
 	memcpy(aad + 8, a2, 6);
 	memcpy(aad + 14, a3, 6);
