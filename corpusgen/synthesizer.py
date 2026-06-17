@@ -246,6 +246,18 @@ FIXED_FIELD_MUTATIONS = {
         # Max listen interval -> extreme sleep-mode buffer sizing
         ("assoc_listen_max",     lambda f: f[0:2] + _u16le(0xFFFF)),
     ],
+    # Action: Category(1) + Action(1) + category-specific body. Post-association
+    # parser surface (reached as an associated STA; host-observable on this target).
+    0x0D: [
+        # Reserved/undefined category -> unhandled dispatch branch
+        ("action_cat_reserved",  lambda f: b"\xff" + f[1:]),
+        # Unknown action code within the category
+        ("action_code_unknown",  lambda f: f[0:1] + b"\xff" + f[2:]),
+        # Over-long body -> length/over-read in the category parser
+        ("action_oversize",      lambda f: f + bytes(250)),
+        # Category byte only, body truncated -> short-frame handling
+        ("action_truncate",      lambda f: f[0:1]),
+    ],
 }
 
 

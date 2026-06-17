@@ -1,0 +1,18 @@
+# idx	label	len
+0	vht_compressed_beamforming/baseline	33
+1	vht_compressed_beamforming/reserved_ie	43
+2	vht_compressed_beamforming/action_cat_reserved	33
+3	vht_compressed_beamforming/action_code_unknown	33
+4	vht_compressed_beamforming/action_oversize	283
+5	vht_compressed_beamforming/action_truncate	25
+6	public_gas_request/baseline	31
+7	public_gas_request/len_overflow	31
+8	public_gas_request/oversized_value	284
+9	public_gas_request/dup_ie	35
+10	public_gas_request/missing_mandatory	27
+11	public_gas_request/zero_len_ie	29
+12	public_gas_request/reserved_ie	41
+13	public_gas_request/action_cat_reserved	31
+14	public_gas_request/action_code_unknown	31
+15	public_gas_request/action_oversize	281
+16	public_gas_request/action_truncate	29

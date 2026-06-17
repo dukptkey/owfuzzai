@@ -1,0 +1,23 @@
+IEEE 802.11 Action frames — structural summary (paraphrased, for tooling)
+
+Action frame. A management frame, Frame Control subtype 13 (Action), used after
+association to carry category-specific requests/reports. The frame body begins with
+a Category field (1 octet) identifying the action category, followed by an
+Action field (1 octet, the action within the category), followed by
+category-specific fields. There are no fixed fields before the Category octet.
+
+VHT Compressed Beamforming (Category 21 = VHT, Action 0). Sent by a beamformee to
+report channel feedback. After Category(21) and Action(0), the body is: VHT MIMO
+Control (3 octets, encoding Nc index, Nr index, channel width, grouping, codebook,
+feedback type, remaining/first segment, sounding dialog token), then the Compressed
+Beamforming Report (a variable-length field of average SNR values followed by
+quantized phi/psi steering angles whose length depends on Nc, Nr, channel width and
+codebook), then the optional MU Exclusive Beamforming Report. The report length is
+not carried explicitly; the receiver computes it from the MIMO Control subfields,
+making the parser sensitive to malformed control values.
+
+Public Action (Category 4). Carries inter-BSS/pre-association public actions. After
+Category(4) and an Action field (e.g. 10 = GAS Initial Request), a GAS Initial
+Request body is: Dialog Token (1 octet), Advertisement Protocol element (Element ID
+108, length, Advertisement Protocol Tuple), and a Query Request field (2-octet
+length followed by the query). Public action frames are never protected.
