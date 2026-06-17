@@ -168,8 +168,8 @@ static uint16_t key_info(const uint8_t *ek)
 
 /* ---------------- state ---------------- */
 #define EK_REPLAY 9   /* 8-byte Key Replay Counter, within the EAPOL body */
-static int g_enabled, g_anonce_set, g_need_derive, g_replay_set, g_dbg;
-static uint8_t g_pmk[32], g_anonce[32], g_snonce[32], g_kck[16], g_replay[8];
+static int g_enabled, g_anonce_set, g_need_derive, g_replay_set, g_dbg, g_ptk_ready;
+static uint8_t g_pmk[32], g_anonce[32], g_snonce[32], g_kck[16], g_tk[16], g_replay[8];
 
 #include <stdio.h>
 static void dbg(const char *tag, const uint8_t *ek)
@@ -223,8 +223,16 @@ static void derive_ptk(const uint8_t *aa, const uint8_t *spa)
 	memcpy(data, a1, 6); memcpy(data + 6, a2, 6);
 	memcpy(data + 12, n1, 32); memcpy(data + 44, n2, 32);
 	sha1_prf(g_pmk, 32, "Pairwise key expansion", data, 76, ptk, 48);
-	memcpy(g_kck, ptk, 16);
-	g_need_derive = 0;
+	memcpy(g_kck, ptk, 16);          /* KCK = PTK[0..15]  (EAPOL MIC) */
+	memcpy(g_tk, ptk + 32, 16);      /* TK  = PTK[32..47] (CCMP data key) */
+	g_need_derive = 0; g_ptk_ready = 1;
+}
+
+int eapol_crypto_get_tk(uint8_t tk[16])
+{
+	if (!g_ptk_ready) return 0;
+	memcpy(tk, g_tk, 16);
+	return 1;
 }
 
 void eapol_crypto_sign(uint8_t *frame, int len, const uint8_t *aa, const uint8_t *spa)

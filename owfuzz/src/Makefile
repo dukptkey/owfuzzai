@@ -10,7 +10,7 @@ CFLAGS+= -g
 SUBDIRS = frames common procedures
 
 FRAMEOBJ = 	./common/queue.o ./common/config.o ./common/pcap_log.o ./common/log.o \
-			./common/mac_addr.o ./frames/frame.o ./frames/frame_handler.o ./frames/corpus.o ./frames/flow.o ./frames/eapol_crypto.o ./frames/80211_packet_common.o \
+			./common/mac_addr.o ./frames/frame.o ./frames/frame_handler.o ./frames/corpus.o ./frames/flow.o ./frames/eapol_crypto.o ./frames/ccmp.o ./frames/80211_packet_common.o \
 			./frames/management/beacon.o ./frames/management/beacon_handler.o ./frames/management/ies_creator.o \
 			./frames/management/probe_response.o ./frames/management/probe_response_handler.o \
 			./frames/management/association_response.o ./frames/management/association_response_handler.o \

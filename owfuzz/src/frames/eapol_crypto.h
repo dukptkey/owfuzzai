@@ -19,6 +19,11 @@ int eapol_crypto_init(const char *psk, const char *ssid);
 /* 1 if -K signing is enabled. */
 int eapol_crypto_enabled(void);
 
+/* Copy out the CCMP Temporal Key (PTK[32..47]) once a PTK has been derived (after
+ * an M1 was observed and an M2/M4 signed). Returns 1 if available, else 0. Lets the
+ * CCMP layer encrypt post-association data frames with the session key. */
+int eapol_crypto_get_tk(uint8_t tk[16]);
+
 /* Inspect a received frame; if it is an EAPOL-Key with the ACK flag (M1/M3), stash its
  * Key Nonce as the ANonce so the next M2/M4 can be signed. */
 void eapol_crypto_observe(const uint8_t *frame, int len);
