@@ -19,13 +19,23 @@ class SpecReaderAgent:
         self.client = client
 
     def run(self, ctx):
-        import anthropic
-        client = self.client or anthropic.Anthropic()
         spec_text = open(ctx.spec).read()
-        system = spec_reader.build_system(spec_text)
+        if ctx.backend == "cli":
+            import llm_cli
+            system_text = (spec_reader.SYSTEM_INSTRUCTIONS +
+                           "\n\n=== IEEE 802.11 SPECIFICATION EXCERPT ===\n" + spec_text)
+            def extract(frame):
+                return llm_cli.complete_json(
+                    system_text, spec_reader.frame_user_prompt(frame), spec_reader.FRAME_SCHEMA)
+        else:
+            import anthropic
+            client = self.client or anthropic.Anthropic()
+            system = spec_reader.build_system(spec_text)
+            def extract(frame):
+                return spec_reader.extract_frame(client, ctx.model, system, frame)[0]
         schema, notes = {}, []
         for frame in ctx.frames:
-            extracted, _ = spec_reader.extract_frame(client, ctx.model, system, frame)
+            extracted = extract(frame)
             entry, _ = spec_reader.normalize(frame, extracted)
             schema[frame] = entry
             notes.append(spec_reader.render_notes(frame, extracted))
@@ -61,10 +71,17 @@ class TriageAgent:
         self.client = client
 
     def run(self, ctx):
-        import anthropic
-        client = self.client or anthropic.Anthropic()
         records = triage.parse_results(ctx.results, ctx.corpus + ".labels")
         _summary, text = triage.summarize(records)
         spec_notes = open(ctx.notes).read() if os.path.exists(ctx.notes) else ""
-        result = triage.triage_llm(client, ctx.model, triage.build_system(spec_notes), text)
+        if ctx.backend == "cli":
+            import llm_cli
+            system_text = triage.SYSTEM_INSTRUCTIONS + (
+                ("\n\n=== SPEC NOTES (context) ===\n" + spec_notes) if spec_notes else "")
+            result = llm_cli.complete_json(
+                system_text, triage.triage_user_prompt(text), triage.PLAN_SCHEMA)
+        else:
+            import anthropic
+            client = self.client or anthropic.Anthropic()
+            result = triage.triage_llm(client, ctx.model, triage.build_system(spec_notes), text)
         triage.write_outputs(result, text, ctx.plan, ctx.report)

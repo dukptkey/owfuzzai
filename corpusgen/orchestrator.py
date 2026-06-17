@@ -115,6 +115,8 @@ def main():
     ap.add_argument("--owfuzz", help="base owfuzz command (quoted); -p/-o are appended")
     ap.add_argument("--rounds", type=int, default=1)
     ap.add_argument("--skip-substrate", action="store_true", help="stop after corpus (run owfuzz manually)")
+    ap.add_argument("--backend", choices=["api", "cli"], default="api",
+                    help="api = Anthropic SDK (ANTHROPIC_API_KEY); cli = `claude -p` (Max subscription)")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
@@ -129,6 +131,7 @@ def main():
         frames=[s.strip() for s in args.frames.split(",") if s.strip()],
         model=args.model,
         owfuzz_cmd=shlex.split(args.owfuzz) if args.owfuzz else [],
+        backend=args.backend,
     )
     build_real(ctx).run(rounds=args.rounds, skip_substrate=args.skip_substrate)
 

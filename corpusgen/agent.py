@@ -18,6 +18,7 @@ class Context:
     frames: list = field(default_factory=lambda: ["beacon", "probe_request", "authentication", "assoc_request"])
     model: str = "claude-opus-4-7"
     owfuzz_cmd: list = field(default_factory=list)  # base owfuzz argv; -p/-o appended by the substrate
+    backend: str = "api"                 # "api" = Anthropic SDK (ANTHROPIC_API_KEY); "cli" = `claude -p`
 
     # artifact paths (resolved under workspace if relative)
     schema: str = "schema.spec"
