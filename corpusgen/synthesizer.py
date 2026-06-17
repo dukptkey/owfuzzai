@@ -68,9 +68,36 @@ def ie(eid, value, length=None):
     return bytes([eid & 0xFF, length & 0xFF]) + value
 
 
+# --- Data frames (EAPOL / 4-way handshake) ----------------------------------
+# A "data" frame carries an LLC/SNAP-encapsulated payload (e.g. EAPOL-Key) rather
+# than 802.11 IEs. owfuzz rewrites addr1/2/3 from the frame's DS flags at send time
+# (corpus_fixup_addrs), so we only set the ToDS bit; addresses stay placeholders.
+TYPE_DATA = 2
+LLC_SNAP_EAPOL = bytes.fromhex("aaaa03000000888e")  # SNAP, ethertype 0x888E (EAPOL)
+
+
+def frame_kind(frame):
+    return frame.get("kind", "mgmt")
+
+
+def data_header(subtype, tods=True, qos_ctrl=None):
+    # FC(2) Dur(2) Addr1(6) Addr2(6) Addr3(6) SeqCtrl(2) [QoSCtrl(2)]. FC octet0 carries
+    # the data subtype (8 = QoS data -> 0x88), octet1 the DS flags (ToDS=0x01 = STA->AP).
+    fc0 = fc_byte0(subtype, TYPE_DATA)
+    fc1 = 0x01 if tods else 0x00
+    hdr = bytes([fc0, fc1]) + bytes(22)  # 24-byte base header
+    if qos_ctrl is not None:
+        hdr += qos_ctrl                  # +2 -> 26-byte QoS header
+    return hdr
+
+
 def build(frame, ies, fixed=None):
     if fixed is None:
         fixed = frame.get("fixed", b"")
+    if frame_kind(frame) == "data":
+        hdr = data_header(frame["subtype"], frame.get("tods", True), frame.get("qos"))
+        encap = LLC_SNAP_EAPOL if frame.get("encap") == "eapol" else b""
+        return hdr + encap + fixed + b"".join(ies)
     return mac_header(frame["subtype"]) + fixed + b"".join(ies)
 
 
@@ -146,6 +173,40 @@ def mutations(frame):
     return out
 
 
+# EAPOL-Key body field offsets (within the EAPOL payload carried as the frame's `fixed`):
+# ver(0) type(1) len(2-3) descriptor(4) keyinfo(5-6) keylen(7-8) replay(9-16) nonce(17-48)
+# iv(49-64) rsc(65-72) keyid(73-80) MIC(81-96) keydatalen(97-98) keydata(99+).
+EK_KEYINFO, EK_KEYLEN, EK_KDL, EK_KEYDATA = 5, 7, 97, 99
+
+
+def _patch(b, off, repl):
+    """Overwrite len(repl) bytes of b at off (in place, same total length)."""
+    return b[:off] + repl + b[off + len(repl):]
+
+
+def eapol_mutations(frame):
+    """EAPOL-Key parser variants: (label, mutated_eapol_body). In-place field rewrites
+    that keep the frame length but break a length/flag invariant -> classic over-read /
+    state-confusion triggers. The baseline stays valid so the AP reaches the parser."""
+    body = frame.get("fixed", b"")
+    if len(body) < EK_KEYDATA:
+        return []
+    out = [
+        # Key Data Length field claims far more than is present -> parser over-read.
+        ("ek_kdl_overflow",     _patch(body, EK_KDL, b"\xff\xff")),
+        # Key Data Length = 0 while key data is present -> length/content mismatch.
+        ("ek_kdl_zero",         _patch(body, EK_KDL, b"\x00\x00")),
+        # Key Length maxed.
+        ("ek_keylen_max",       _patch(body, EK_KEYLEN, b"\xff\xff")),
+        # Key Information all bits set (bogus descriptor version / type / flags).
+        ("ek_keyinfo_ff",       _patch(body, EK_KEYINFO, b"\xff\xff")),
+    ]
+    # RSN element inside Key Data claims an oversized element length (id@KEYDATA, len@+1).
+    if len(body) > EK_KEYDATA + 1:
+        out.append(("ek_rsne_len_overflow", _patch(body, EK_KEYDATA + 1, b"\xff")))
+    return out
+
+
 # Fixed-field mutation table keyed by 802.11 management subtype.
 # Each entry is a list of (label, transform) where transform(fixed_bytes) -> mutated_bytes.
 # Fields are little-endian as on the wire.
@@ -209,7 +270,21 @@ def generate(schema, plan=None):
             continue
         if name in drop_frames:
             continue
+        # Data/EAPOL frames: baseline + EAPOL-Key mutators. Management frames: baseline +
+        # IE + fixed-field mutators. A frame with "fuzz": false emits only the (valid)
+        # baseline — used for the flow's carrier frames (auth/assoc) that must be accepted
+        # so the handshake advances to the fuzz target.
+        if frame_kind(fr) == "data":
+            frames.append(("%s/baseline" % name, build(fr, [])))
+            if fr.get("fuzz", True):
+                for label, body in eapol_mutations(fr):
+                    if focus_muts and label not in focus_muts:
+                        continue
+                    frames.append(("%s/%s" % (name, label), build(fr, [], fixed=body)))
+            continue
         frames.append(("%s/baseline" % name, build(fr, baseline_ies(fr))))
+        if not fr.get("fuzz", True):
+            continue
         for label, ies in mutations(fr):
             if focus_muts and label not in focus_muts:
                 continue
@@ -261,6 +336,8 @@ def load_schema(path):
     for fr in raw.values():
         if isinstance(fr.get("fixed"), str):
             fr["fixed"] = bytes.fromhex(fr["fixed"])
+        if isinstance(fr.get("qos"), str):       # data-frame QoS control octets
+            fr["qos"] = bytes.fromhex(fr["qos"])
         for e in fr.get("ies", []):
             if isinstance(e.get("value"), str):
                 e["value"] = bytes.fromhex(e["value"])

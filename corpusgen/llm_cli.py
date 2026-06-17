@@ -7,7 +7,22 @@ server-side json_schema enforcement, the schema is handed to the model in the
 prompt and the response is parsed/validated here. Selected with --backend cli.
 """
 import json
+import re
 import subprocess
+
+
+def _repair_json(text):
+    """Best-effort repair of the common CLI-backend JSON quirks the model emits without
+    server-side schema enforcement: trailing commas before } or ]. Conservative — only
+    touches comma-then-closer, leaving string contents intact in practice."""
+    return re.sub(r",(\s*[}\]])", r"\1", text)
+
+
+def _loads(text):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(_repair_json(text))  # retry once with trailing commas stripped
 
 
 def _extract_result(stdout):
@@ -51,7 +66,7 @@ def complete_json(system_text, user_text, schema, model=None, timeout=600, retri
         if proc.returncode != 0:
             raise RuntimeError("claude CLI failed (%d): %s" % (proc.returncode, proc.stderr[:500]))
         try:
-            return json.loads(_strip_fences(_extract_result(proc.stdout)))
+            return _loads(_strip_fences(_extract_result(proc.stdout)))
         except (json.JSONDecodeError, StopIteration, KeyError) as e:
             last_err = e
     raise RuntimeError("claude CLI returned unparseable JSON after %d attempts: %s" % (retries, last_err))

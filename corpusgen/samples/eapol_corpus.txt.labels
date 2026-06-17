@@ -1,0 +1,10 @@
+# idx	label	len
+0	auth_open/baseline	30
+1	assoc_req/baseline	216
+2	m2/baseline	155
+3	m2/ek_kdl_overflow	155
+4	m2/ek_kdl_zero	155
+5	m2/ek_keylen_max	155
+6	m2/ek_keyinfo_ff	155
+7	m2/ek_rsne_len_overflow	155
+8	m4/baseline	133

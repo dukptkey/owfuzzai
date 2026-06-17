@@ -1,0 +1,43 @@
+IEEE 802.11 / 802.1X WPA2 4-way handshake — structural summary (paraphrased, for tooling)
+
+Overview. After a station (STA, the supplicant) open-authenticates and associates to an
+RSN access point (AP, the authenticator), the two run the 4-way handshake to confirm the
+pairwise master key (PMK) and derive transient keys. The handshake is four EAPOL-Key
+messages carried inside 802.11 data frames: each frame body is an LLC/SNAP header with
+EtherType 0x888E (EAPOL) followed by the EAPOL-Key descriptor.
+
+Roles and message order (STA's view):
+- The STA first sends an Open-System Authentication frame, then, after the AP's
+  Authentication reply, an Association Request bearing its RSN element.
+- After the AP's Association Response, the AP begins the 4-way handshake by sending
+  message 1 (M1) to the STA. The STA replies with message 2 (M2).
+- The AP then sends message 3 (M3); the STA replies with message 4 (M4); the handshake
+  is then complete.
+
+EAPOL-Key descriptor fields, in order: protocol version (1), packet type (1, = 3 for
+Key), body length (2), descriptor type (1), Key Information (2), Key Length (2), Replay
+Counter (8), Key Nonce (32), Key IV (16), Key RSC (8), reserved (8), Key MIC (16), Key
+Data Length (2), Key Data (variable).
+
+Distinguishing the messages. The Key Information field's flag bits identify the message:
+M1 carries the Key-ACK flag with neither the Key-MIC nor Secure flags set; M2 carries
+Key-MIC (with key data = the STA's RSN element); M3 carries Key-MIC, Secure, and Key-ACK
+(with key data = the encrypted group key); M4 carries Key-MIC and Secure with no key data.
+M2 and M4 are integrity-protected by the Key MIC, which is computed over the EAPOL-Key
+frame using a key derived from the PMK and the two nonces.
+
+============================================================================
+## Target binding (from OTA recon of VIVOFIBRA-WIFI6-CF81; see eapol_4way_recon.md)
+These are the concrete, target-specific constants to use when emitting the flow. The
+fuzzer (owfuzz) acts as the STA fuzzing the AP.
+- Use these exact frame-type names for the on_rx column: the AP's Authentication reply =
+  AUTH; the Association Response = ASSOCRES; the EAPOL-Key data frames = QOSDATA.
+- The EAPOL-Key frames are 802.11 QoS Data frames (frame type name: QOSDATA).
+- A received frame's message number is told by ONE byte: the Key-Information low byte,
+  at offset 40 counting from the start of the 802.11 frame (the MAC header is included).
+  Its value is 0x8a for M1, 0x0a for M2, 0xca for M3, 0x0a for M4.
+- Frames the STA SENDS, by send id: open authentication = "auth_open"; association
+  request = "assoc_req"; handshake message 2 = "m2"; handshake message 4 = "m4".
+- Use INIT as the start state and DONE as the terminal state. The STA: sends auth_open
+  on entry; on the AP's Authentication, sends assoc_req; on the Association Response,
+  waits for M1; on receiving M1, sends m2; on receiving M3, sends m4.
