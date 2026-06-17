@@ -29,6 +29,7 @@
 #include "frames/frame.h"
 #include "frames/corpus.h"
 #include "frames/flow.h"
+#include "frames/eapol_crypto.h"
 #include "common/log.h"
 #include "common/pcap_log.h"
 #include "common/config.h"
@@ -183,6 +184,8 @@ void usage_help(char *name)
 		   "\t   Write a per-frame results log (TSV) for the PoC test (-T 0). 'alive'=0 marks the target going silent (OTA beacon liveness, or ping if -I is set).\n"
 		   "\t-F [flow file]\n"
 		   "\t   Generic flow table (interactive test -T 1): drives a stateful corpus through an arbitrary state machine defined in the file, not hardcoded in C (see frames/flow.h). Frames come from the -p corpus via @send ids.\n"
+		   "\t-K [psk]\n"
+		   "\t   Wi-Fi passphrase (PSK). When set, owfuzz signs EAPOL-Key M2/M4 with a valid MIC (PMK from -K + -S SSID), so the 4-way handshake completes past the MIC gate into the post-authentication surface. Optional; without it, fuzzing stops at the (pre-MIC) M2 parser.\n"
 		   "\t-h Help.\n",
 		   TEST_FRAME, TEST_INTERACTIVE, TEST_POC, TEST_INTERACTIVE, TEST_FRAME, TEST_INTERACTIVE_FRAME);
 }
@@ -991,6 +994,11 @@ static void emit_flow_frame(fuzzing_option *fo, const char *send_id)
 	if (corpus_lookup_send(send_id, &p))
 	{
 		corpus_fixup_addrs(fo, &p);
+		/* -K: if this is an EAPOL M2/M4, write a valid SNonce + MIC over the
+		 * (possibly fuzzed) frame so the AP accepts it and the handshake advances. */
+		if (eapol_crypto_enabled())
+			eapol_crypto_sign(p.data, p.len, fo->bssid.ether_addr_octet,
+					  fo->source_addr.ether_addr_octet);
 		p.channel = fo->channel;
 		fo->fuzz_pkt = p;
 		send_packet_ex(&p);
@@ -1013,7 +1021,11 @@ static void flow_drive_spontaneous(fuzzing_option *fo)
 /* Reactive transition driven by a received frame. */
 static void flow_drive_reactive(fuzzing_option *fo, struct packet *rx)
 {
-	const flow_rule_t *r = flow_match_rule(rx);
+	const flow_rule_t *r;
+	/* -K: stash the AP's ANonce from a received M1/M3 before we react. */
+	if (eapol_crypto_enabled())
+		eapol_crypto_observe(rx->data, rx->len);
+	r = flow_match_rule(rx);
 	if (r)
 	{
 		if (r->send_id[0])
@@ -2973,6 +2985,7 @@ int fuzzing(int argc, char *argv[])
 	char *fuzz_mode = NULL;
 	char *interface = NULL;
 	char *target_ssid = NULL;
+	char *psk_str = NULL;
 	char *auth_type = NULL;
 	char *target_mac_str = NULL;
 	struct ether_addr target_mac;
@@ -2997,7 +3010,7 @@ int fuzzing(int argc, char *argv[])
 
 	if (argc > 1)
 	{
-		while ((c = getopt(argc, argv, "m:i:t:s:b:I:c:hS:A:T:l:f:r:p:o:F:")) < 255)
+		while ((c = getopt(argc, argv, "m:i:t:s:b:I:c:hS:A:T:l:f:r:p:o:F:K:")) < 255)
 		{
 			switch (c)
 			{
@@ -3126,6 +3139,9 @@ int fuzzing(int argc, char *argv[])
 				break;
 			case 'o':
 				strncpy(fuzzing_opt.results_file, optarg, sizeof(fuzzing_opt.results_file) - 1);
+				break;
+			case 'K':
+				psk_str = strdup(optarg);
 				break;
 			case 'F':
 				strncpy(fuzzing_opt.flow_file, optarg, sizeof(fuzzing_opt.flow_file) - 1);
@@ -3373,6 +3389,16 @@ int fuzzing(int argc, char *argv[])
 		if (!fuzzing_opt.payload_file[0])
 			fuzz_logger_log(FUZZ_LOG_WARN, "-F flow given without -p corpus; flow has no frames to send.");
 		flow_load(fuzzing_opt.flow_file);
+	}
+
+	/* -K <psk>: enable EAPOL M2/M4 MIC signing so the 4-way handshake can complete
+	 * (needs -S for the SSID; PMK = PBKDF2(psk, ssid)). */
+	if (psk_str)
+	{
+		if (target_ssid && eapol_crypto_init(psk_str, target_ssid))
+			fuzz_logger_log(FUZZ_LOG_INFO, "[eapol] -K signing enabled for SSID '%s'", target_ssid);
+		else
+			fuzz_logger_log(FUZZ_LOG_WARN, "-K given but SSID (-S) missing; EAPOL signing disabled.");
 	}
 
 	if (TEST_POC == fuzzing_opt.test_type)
