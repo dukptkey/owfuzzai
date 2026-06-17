@@ -12,3 +12,6 @@ __pycache__/
 modelosparapublicaodeartigos.zip
 Template_SBC/
 paper/
+corpusgen/samples/eapol_4way_recon.md
+corpusgen/samples/wpa2_4way_crypto.md
+corpusgen/samples/postassoc_action_experiment.md
